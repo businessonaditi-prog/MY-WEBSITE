@@ -1,0 +1,6 @@
+{
+  "name": "CINEAD.CC",
+  "description": "CINEAD.CC - Cinema accessibility companion player for authorized screenings with synchronized Audio Description (AD) and Closed Captions (CC).",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
