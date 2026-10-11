@@ -582,6 +582,9 @@ export default function App() {
           watermark={playbackSession.watermark}
           isOfflineMode={playbackSession.sessionToken.startsWith('offline_')}
           onClose={() => setPlaybackSession(null)}
+          platformMode={platformMode}
+          onTogglePlatformMode={handleTogglePlatformMode}
+          currentUser={currentUser}
         />
       )}
     </div>

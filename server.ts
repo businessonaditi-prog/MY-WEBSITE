@@ -1402,10 +1402,19 @@ app.get(['/api/auth/me', '/api/me', '/auth/me'], authenticateToken, handleGetMe)
 // 7. Common Film Gallery (Public Discovery - Strips preview codes except for the film's verified owner)
 app.get('/api/films', optionalAuthenticate, (req: AuthenticatedRequest, res: Response) => {
   const currentUserId = req.user?.id;
+  const currentUserProdHouse = req.user?.productionHouseName?.toLowerCase();
+  const currentUserEmail = req.user?.email?.toLowerCase();
+
   const publicFilms = Array.from(db.films.values())
     .filter((f) => f.status === 'ready' && f.previewStatus === 'available')
     .map((f) => {
-      const isOwner = Boolean(currentUserId && f.userId === currentUserId);
+      const isOwner = Boolean(
+        currentUserId && (
+          f.userId === currentUserId ||
+          (currentUserProdHouse && f.productionHouseName && currentUserProdHouse === f.productionHouseName.toLowerCase()) ||
+          (currentUserEmail && f.submitterEmail && currentUserEmail === f.submitterEmail.toLowerCase())
+        )
+      );
       return {
         id: f.id,
         userId: f.userId,
@@ -1445,7 +1454,13 @@ app.get('/api/films/:id', optionalAuthenticate, (req: AuthenticatedRequest, res:
     return res.status(404).json({ error: 'Film not found.' });
   }
 
-  const isOwner = req.user && req.user.id === film.userId;
+  const isOwner = Boolean(
+    req.user && (
+      req.user.id === film.userId ||
+      (req.user.productionHouseName && film.productionHouseName && req.user.productionHouseName.toLowerCase() === film.productionHouseName.toLowerCase()) ||
+      (req.user.email && film.submitterEmail && req.user.email.toLowerCase() === film.submitterEmail.toLowerCase())
+    )
+  );
 
   const publicData = {
     id: film.id,
@@ -2209,6 +2224,8 @@ app.post('/api/preview/verify-code', optionalAuthenticate, (req: AuthenticatedRe
       productionHouseName: targetFilm.productionHouseName,
       director: targetFilm.director,
       posterUrl: targetFilm.posterUrl,
+      videoFileUrl: targetFilm.videoFileUrl || '/videos/theatrical_master_kalki.mp4',
+      videoFileName: targetFilm.videoFileName || 'theatrical_master.mp4',
       languageCode: targetFilm.languageCode,
       languageName: targetFilm.languageName,
       durationMinutes: targetFilm.durationMinutes,
@@ -2235,7 +2252,13 @@ app.post('/api/playback/authorize-owner', authenticateToken, (req: Authenticated
   }
 
   // Owner check (or system admin)
-  if (film.userId !== user.id && user.role !== 'admin') {
+  const isOwner = Boolean(
+    film.userId === user.id ||
+    (user.productionHouseName && film.productionHouseName && user.productionHouseName.toLowerCase() === film.productionHouseName.toLowerCase()) ||
+    (user.email && film.submitterEmail && user.email.toLowerCase() === film.submitterEmail.toLowerCase())
+  );
+
+  if (!isOwner && user.role !== 'admin') {
     return res.status(403).json({
       error: 'You do not own this film. Non-owner playback requires a valid 9-digit preview code.',
     });
@@ -2275,6 +2298,8 @@ app.post('/api/playback/authorize-owner', authenticateToken, (req: Authenticated
       productionHouseName: film.productionHouseName,
       director: film.director,
       posterUrl: film.posterUrl,
+      videoFileUrl: film.videoFileUrl || '/videos/theatrical_master_kalki.mp4',
+      videoFileName: film.videoFileName || 'theatrical_master.mp4',
       languageCode: film.languageCode,
       languageName: film.languageName,
       durationMinutes: film.durationMinutes,
@@ -2307,11 +2332,41 @@ app.get('/api/playback/stream/:token', (req: Request, res: Response) => {
   // Return secure playback stream manifest
   return res.json({
     streamUrl: film.videoFileUrl,
+    directVideoUrl: `/api/playback/video/${token}`,
     title: film.title,
     durationMinutes: film.durationMinutes,
     watermark: session.watermark,
     expiresAt: session.expiresAt,
   });
+});
+
+// 15a. Direct Binary Byte-Range Video Streaming Endpoint by Session Token
+app.get('/api/playback/video/:token', (req: Request, res: Response) => {
+  const { token } = req.params;
+  const session = db.playbackSessions.get(token);
+  if (!session) {
+    return res.status(403).json({ error: 'Playback session invalid or expired.' });
+  }
+
+  const film = db.films.get(session.filmId);
+  if (!film) {
+    return res.status(404).json({ error: 'Film asset not found.' });
+  }
+
+  // Resolve to local file if available
+  const candidateFilename = film.videoFileUrl ? path.basename(film.videoFileUrl) : 'theatrical_master_kalki.mp4';
+  const filePath = path.join(activeVideosDir, candidateFilename);
+  const fallbackPath = path.join(activeVideosDir, 'theatrical_master_kalki.mp4');
+  const targetPath = fs.existsSync(filePath) ? filePath : fallbackPath;
+
+  if (fs.existsSync(targetPath)) {
+    res.setHeader('Content-Type', 'video/mp4');
+    res.setHeader('Accept-Ranges', 'bytes');
+    res.setHeader('Cache-Control', 'public, max-age=86400');
+    return res.sendFile(targetPath);
+  }
+
+  return res.redirect(film.videoFileUrl || '/videos/theatrical_master_kalki.mp4');
 });
 
 // 15b. AI Theatre Acoustic Audio Sync Alignment (Gemini 3.8 Flash Powered)

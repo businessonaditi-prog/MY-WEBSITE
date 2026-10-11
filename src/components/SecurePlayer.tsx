@@ -9,43 +9,39 @@ import {
   Settings,
   Subtitles,
   Headphones,
-  Mic,
-  MicOff,
   Radio,
   X,
   RotateCcw,
   RotateCw,
   AlertCircle,
   ShieldCheck,
-  Moon,
-  Lock,
-  Unlock,
-  Sliders,
-  Sparkles,
   CheckCircle2,
-  QrCode,
-  Smartphone,
-  Cloud,
-  Film as FilmIcon,
-  Tv,
-  ArrowRight,
-  Gauge,
-  RefreshCw,
-  Eye,
-  Zap,
   Download,
   HardDrive,
   Check,
   Loader2,
-  WifiOff,
-  Trash2,
+  ChevronDown,
+  Heart,
+  MoreVertical,
+  ArrowLeft,
+  Search,
+  User as UserIcon,
+  Globe,
+  Smartphone,
+  Sparkles,
+  Zap,
+  Sliders,
+  Info,
+  Film as FilmIcon,
+  Wifi,
+  Battery,
 } from 'lucide-react';
-import { Film, AccessibilityTrack } from '../types/cinemaPlatform';
-import { CCTheme, CCFontSize, CCPosition, SyncStatus } from '../types/accessibility';
+import { Film, AccessibilityTrack, User } from '../types/cinemaPlatform';
 import { speechNarrator } from '../services/speechSynthesisService';
 import { acousticSync, AcousticAnalysisData } from '../services/acousticSyncService';
 import { offlineStorage, DownloadProgress } from '../services/offlineStorageService';
-import { SecurePlayerQRScannerOverlay, PairedMobileDevice } from './SecurePlayerQRScannerOverlay';
+import { parseSubtitleText } from '../utils/mediaParser';
+import { PlatformMode } from '../utils/platformEnvironment';
 
 interface SecurePlayerProps {
   film: Film;
@@ -53,9 +49,12 @@ interface SecurePlayerProps {
   watermark: string;
   onClose: () => void;
   isOfflineMode?: boolean;
+  platformMode?: PlatformMode;
+  onTogglePlatformMode?: (mode: PlatformMode) => void;
+  currentUser?: User | null;
 }
 
-// High-compatibility zero-latency master streams and resilient CDN fallbacks
+// Resilient fallback streams verified to play reliably with byte-range support
 const HIGH_COMPATIBILITY_STREAMS = [
   '/videos/theatrical_master_kalki.mp4',
   '/videos/theatrical_master_sample.mp4',
@@ -70,59 +69,283 @@ export const SecurePlayer: React.FC<SecurePlayerProps> = ({
   watermark,
   onClose,
   isOfflineMode = false,
+  platformMode = 'website',
+  onTogglePlatformMode,
+  currentUser,
 }) => {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const controlsTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-  const lastTapTimeRef = useRef<{ time: number; side: 'left' | 'right' | 'center' }>({ time: 0, side: 'center' });
 
-  // 1. Playback Mode: Standalone Normal Play (Default for mobile & website) vs AI Theatrical Audio Sync
-  // Requirement: If not in theatre, play normally without syncing! When in theatre, sync with AI!
-  const [playbackMode, setPlaybackMode] = useState<'normal' | 'theatre-sync'>('normal');
+  // 1. In-Player Platform View Mode: Desktop Website View vs Mobile App View
+  const [activePlatformView, setActivePlatformView] = useState<PlatformMode>(platformMode);
 
-  // 2. Video Playback & Mobile Video Stream Management
+  // Sync with prop if it changes externally
+  useEffect(() => {
+    setActivePlatformView(platformMode);
+  }, [platformMode]);
+
+  const handleSwitchPlatformView = (mode: PlatformMode) => {
+    setActivePlatformView(mode);
+    if (onTogglePlatformMode) {
+      onTogglePlatformMode(mode);
+    }
+  };
+
+  // 2. Playback State
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
   const [isBuffering, setIsBuffering] = useState<boolean>(false);
   const [currentTime, setCurrentTime] = useState<number>(0);
-  const [duration, setDuration] = useState<number>(0);
-  const [filmVolume, setFilmVolume] = useState<number>(1);
+  const [duration, setDuration] = useState<number>(() => (film.durationMinutes || 120) * 60);
+  const [volume, setVolume] = useState<number>(1);
   const [isMuted, setIsMuted] = useState<boolean>(false);
-  const [showUnmutePrompt, setShowUnmutePrompt] = useState<boolean>(false);
   const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
-  const [showControls, setShowControls] = useState<boolean>(true);
-  const [isTouchLocked, setIsTouchLocked] = useState<boolean>(false);
   const [playbackSpeed, setPlaybackSpeed] = useState<number>(1);
-  const [videoSourceType, setVideoSourceType] = useState<'auto' | 'standard' | 'cloud' | 'original'>('auto');
+  const [showControls, setShowControls] = useState<boolean>(true);
   const [streamFallbackIndex, setStreamFallbackIndex] = useState<number>(0);
   const [videoLoadError, setVideoLoadError] = useState<string | null>(null);
-  const [hasStartedPlayback, setHasStartedPlayback] = useState<boolean>(false);
-  const [seekFeedback, setSeekFeedback] = useState<{ text: string; side: 'left' | 'right' } | null>(null);
+  const [isFavorite, setIsFavorite] = useState<boolean>(false);
+  const [showSettingsDrawer, setShowSettingsDrawer] = useState<boolean>(false);
 
-  // 2b. Zero-Buffer Local Device Playback & Sandboxed Download State
+  // 3. Zero-Buffer Local Device Sandbox State
   const [localBlobUrl, setLocalBlobUrl] = useState<string | null>(null);
   const [isLocalBlobActive, setIsLocalBlobActive] = useState<boolean>(false);
-  const [isCheckingLocal, setIsCheckingLocal] = useState<boolean>(true);
-  const [isDownloadModalOpen, setIsDownloadModalOpen] = useState<boolean>(false);
   const [isDownloading, setIsDownloading] = useState<boolean>(false);
   const [downloadProgress, setDownloadProgress] = useState<DownloadProgress | null>(null);
-  const [downloadError, setDownloadError] = useState<string | null>(null);
-  const [showZeroBufferPrompt, setShowZeroBufferPrompt] = useState<boolean>(false);
-  const [bufferingAlertDismissed, setBufferingAlertDismissed] = useState<boolean>(false);
-  const downloadAbortControllerRef = useRef<AbortController | null>(null);
+  const [isDownloadModalOpen, setIsDownloadModalOpen] = useState<boolean>(false);
 
-  // 3. Auditorium Acoustic Sync State (Only engaged in Theatre Sync Mode)
-  const [isMicSyncActive, setIsMicSyncActive] = useState<boolean>(false);
-  const [syncStatus, setSyncStatus] = useState<SyncStatus>('listening');
-  const [syncConfidence, setSyncConfidence] = useState<number>(94);
-  const [spectrum, setSpectrum] = useState<number[]>([0.4, 0.7, 0.9, 0.5, 0.8, 0.3, 0.6, 0.85, 0.5, 0.7, 0.4, 0.9, 0.6, 0.3, 0.5, 0.7]);
-  const [ambientDb, setAmbientDb] = useState<number>(64);
-  const [syncOffsetMs, setSyncOffsetMs] = useState<number>(0); // -2000 to +2000 ms
-  const [showSyncBar, setShowSyncBar] = useState<boolean>(false);
-  const [aiSyncScene, setAiSyncScene] = useState<string>('Auditorium Audio Aligned');
-  const [muteMovieAudioInTheatre, setMuteMovieAudioInTheatre] = useState<boolean>(false);
+  // Check local offline storage on startup
+  useEffect(() => {
+    let isMounted = true;
+    const checkLocal = async () => {
+      try {
+        const hasBlob = await offlineStorage.hasLocalVideoBlob(film.id);
+        if (hasBlob && isMounted) {
+          const blobUrl = await offlineStorage.getLocalBlobUrl(film.id);
+          if (blobUrl && isMounted) {
+            setLocalBlobUrl(blobUrl);
+            setIsLocalBlobActive(true);
+          }
+        }
+      } catch (e) {
+        console.warn('Error reading local video blob cache:', e);
+      }
+    };
+    checkLocal();
+    return () => {
+      isMounted = false;
+    };
+  }, [film.id]);
 
-  // 4. Closed Caption (CC) Configuration
-  // Universal fallback so CC is ALWAYS available and NEVER broken, even on custom uploads
+  // 4. Resolve Best Playable Video URL
+  const resolvedVideoUrl = useMemo(() => {
+    // 1st Priority: Valid sandboxed local device blob for instant zero-buffering
+    if (localBlobUrl) {
+      return localBlobUrl;
+    }
+
+    // 2nd Priority: Error fallback cycling
+    if (videoLoadError) {
+      return HIGH_COMPATIBILITY_STREAMS[streamFallbackIndex % HIGH_COMPATIBILITY_STREAMS.length];
+    }
+
+    // 3rd Priority: Film's specific video URL if playable
+    if (
+      film.videoFileUrl &&
+      !film.videoFileUrl.includes('gtv-videos-bucket') &&
+      !film.videoFileUrl.endsWith('.tar') &&
+      !film.videoFileUrl.endsWith('.dcp') &&
+      !film.videoFileUrl.endsWith('.mxf')
+    ) {
+      return film.videoFileUrl;
+    }
+
+    // 4th Priority: Direct session streaming gateway
+    if (sessionToken && !sessionToken.startsWith('offline_')) {
+      return `/api/playback/video/${sessionToken}`;
+    }
+
+    // 5th Priority: Drive stream or high-compatibility master
+    if (film.driveFileId) {
+      return `/api/drive/stream/${film.driveFileId}`;
+    }
+
+    return HIGH_COMPATIBILITY_STREAMS[0];
+  }, [localBlobUrl, videoLoadError, streamFallbackIndex, film.videoFileUrl, film.driveFileId, sessionToken]);
+
+  // Handle URL change
+  useEffect(() => {
+    if (videoRef.current) {
+      videoRef.current.load();
+      if (isPlaying) {
+        videoRef.current.play().catch((e) => {
+          console.warn('Playback resume required gesture:', e);
+        });
+      }
+    }
+  }, [resolvedVideoUrl]);
+
+  // Apply playback speed
+  useEffect(() => {
+    if (videoRef.current) {
+      videoRef.current.playbackRate = playbackSpeed;
+    }
+  }, [playbackSpeed]);
+
+  // Apply volume & mute
+  useEffect(() => {
+    if (videoRef.current) {
+      videoRef.current.volume = isMuted ? 0 : volume;
+      videoRef.current.muted = isMuted;
+    }
+  }, [volume, isMuted]);
+
+  // 5. Audio Description (AD) Tracks & Controls
+  const availableAdTracks = useMemo<AccessibilityTrack[]>(() => {
+    if (film.uploadedAdTracks && film.uploadedAdTracks.length > 0) {
+      return film.uploadedAdTracks;
+    }
+    const filmLang = film.languageName || 'Primary Language';
+    const filmCode = film.languageCode || 'native';
+    return [
+      {
+        id: `auto-ad-${film.id}-${filmCode}`,
+        filmId: film.id,
+        type: 'AD',
+        languageCode: filmCode,
+        languageName: `${filmLang} (AD)`,
+        fileUrl: `/storage/tracks/ad_${film.id}_${filmCode}.mp3`,
+        fileName: `ad_${filmCode}.mp3`,
+        format: 'MP3',
+        version: '1.0',
+        status: 'valid',
+        cues: [
+          {
+            id: 'ad-cue-1',
+            startTime: 0,
+            endTime: 8,
+            text: `Statutory theatrical certification sequence commences for ${film.title}. The auditorium settles as the main title appears.`,
+          },
+          {
+            id: 'ad-cue-2',
+            startTime: 8,
+            endTime: 20,
+            text: `Establishing panoramic vista: Dramatic atmospheric score plays while central figures advance across the terrain.`,
+          },
+          {
+            id: 'ad-cue-3',
+            startTime: 20,
+            endTime: 34,
+            text: `High-contrast cinematic lighting reveals key character expressions during the dialogue sequence.`,
+          },
+        ],
+      },
+      {
+        id: `auto-ad-${film.id}-en`,
+        filmId: film.id,
+        type: 'AD',
+        languageCode: 'en',
+        languageName: 'English (AD)',
+        fileUrl: `/storage/tracks/ad_${film.id}_en.mp3`,
+        fileName: `ad_en.mp3`,
+        format: 'MP3',
+        version: '1.0',
+        status: 'valid',
+        cues: [
+          {
+            id: 'ad-cue-en-1',
+            startTime: 0,
+            endTime: 8,
+            text: `Visual Scene Description: The statutory cinema certification emblem appears for ${film.title}. The title sequence commences.`,
+          },
+          {
+            id: 'ad-cue-en-2',
+            startTime: 8,
+            endTime: 20,
+            text: `Visual scene description in English: Wide panoramic shot introduces the central dramatic sequence under theatrical lighting.`,
+          },
+        ],
+      },
+    ];
+  }, [film]);
+
+  const [isAdEnabled, setIsAdEnabled] = useState<boolean>(true);
+  const [selectedAdLang, setSelectedAdLang] = useState<string>(() => {
+    return availableAdTracks.length > 0 ? availableAdTracks[0].languageCode : 'en';
+  });
+  const [isAdDropdownOpen, setIsAdDropdownOpen] = useState<boolean>(false);
+  const [isDuckingActive, setIsDuckingActive] = useState<boolean>(false);
+
+  // Active AD track
+  const currentAdTrack = useMemo(() => {
+    if (!isAdEnabled) return null;
+    return (
+      availableAdTracks.find(
+        (t) =>
+          t.languageCode.toLowerCase() === selectedAdLang.toLowerCase() ||
+          t.id.toLowerCase() === selectedAdLang.toLowerCase()
+      ) ||
+      availableAdTracks[0] ||
+      null
+    );
+  }, [availableAdTracks, selectedAdLang, isAdEnabled]);
+
+  // Active AD Cue matching current playback time (single source of truth: startTime <= currentTime < endTime)
+  const activeAdCue = useMemo(() => {
+    if (!isAdEnabled || !currentAdTrack) return null;
+    const cues = currentAdTrack.cues || [];
+
+    // Direct timestamp match: startTime <= currentTime < endTime
+    const directMatch = cues.find((c) => currentTime >= c.startTime && currentTime < c.endTime);
+    return directMatch || null;
+  }, [isAdEnabled, currentAdTrack, currentTime]);
+
+  // Immediately cancel existing speech when AD language changes or is disabled
+  useEffect(() => {
+    speechNarrator.stop();
+    speechNarrator.resetLastCue();
+    if (videoRef.current && !isMuted) {
+      videoRef.current.volume = volume;
+      setIsDuckingActive(false);
+    }
+  }, [selectedAdLang, isAdEnabled, volume, isMuted]);
+
+  // Audio Description Narration (TTS with gentle Audio Ducking)
+  useEffect(() => {
+    if (isAdEnabled && activeAdCue && isPlaying) {
+      // Soften main film audio during visual scene description
+      if (videoRef.current) {
+        videoRef.current.volume = Math.max(0.15, volume * 0.3);
+        setIsDuckingActive(true);
+      }
+
+      speechNarrator.speak(
+        activeAdCue.id,
+        activeAdCue.text,
+        currentAdTrack?.languageName || 'English',
+        1.0,
+        1.0
+      );
+
+      const cueDurationMs = Math.max(2500, (activeAdCue.endTime - activeAdCue.startTime) * 1000);
+      const timer = setTimeout(() => {
+        if (videoRef.current && !isMuted) {
+          videoRef.current.volume = volume;
+          setIsDuckingActive(false);
+        }
+      }, cueDurationMs);
+
+      return () => clearTimeout(timer);
+    } else {
+      speechNarrator.stop();
+      if (videoRef.current && !isMuted) {
+        videoRef.current.volume = volume;
+        setIsDuckingActive(false);
+      }
+    }
+  }, [activeAdCue, isAdEnabled, isPlaying, volume, currentAdTrack, isMuted]);
+
+  // 6. Closed Captions (CC) Tracks & Controls
   const availableCcTracks = useMemo<AccessibilityTrack[]>(() => {
     if (film.uploadedCcTracks && film.uploadedCcTracks.length > 0) {
       return film.uploadedCcTracks;
@@ -143,28 +366,36 @@ export const SecurePlayer: React.FC<SecurePlayerProps> = ({
         status: 'valid',
         cues: [
           {
-            id: 'auto-c-1',
+            id: 'c-1',
             startTime: 0,
-            endTime: 8,
+            endTime: 7,
             speaker: 'CBFC CINEAD',
-            text: `[Theatrical Exhibition • ${film.title.toUpperCase()} in ${filmLang}]`,
-            soundEffect: 'Auditorium opening fanfare ♪',
+            text: `We have to protect this place for the next generation.`,
+            soundEffect: 'Opening overture ♪',
           },
           {
-            id: 'auto-c-2',
-            startTime: 8,
-            endTime: 18,
-            speaker: film.director ? film.director.toUpperCase() : 'DIRECTOR',
-            text: `Opening theatrical sequence in ${filmLang}. Directed by ${film.director}.`,
-            soundEffect: 'Cinematic orchestral overture ♪',
-          },
-          {
-            id: 'auto-c-3',
-            startTime: 18,
-            endTime: 30,
+            id: 'c-2',
+            startTime: 7,
+            endTime: 16,
             speaker: 'LEAD PROTAGONIST',
-            text: `Key cinematic dialogue sequence in ${filmLang}.`,
-            soundEffect: 'Ambient hall resonance',
+            text: `The statutory theatrical certification sequence has commenced. Stand firm.`,
+            soundEffect: 'Dramatic orchestral crescendo ♪',
+          },
+          {
+            id: 'c-3',
+            startTime: 16,
+            endTime: 25,
+            speaker: 'NARRATOR',
+            text: `Production house: ${film.productionHouseName}. All accessibility tracks certified under CBFC guidelines.`,
+            soundEffect: 'Low-frequency bass reverberation',
+          },
+          {
+            id: 'c-4',
+            startTime: 25,
+            endTime: 35,
+            speaker: 'SUPPORTING CAST',
+            text: `Energy matrix synchronized at one hundred percent. Our destiny awaits.`,
+            soundEffect: 'Atmospheric strings ♪',
           },
         ],
       },
@@ -173,7 +404,7 @@ export const SecurePlayer: React.FC<SecurePlayerProps> = ({
         filmId: film.id,
         type: 'CC',
         languageCode: 'en',
-        languageName: 'English (SDH)',
+        languageName: 'English',
         fileUrl: `/storage/tracks/cc_${film.id}_en.vtt`,
         fileName: `cc_en.vtt`,
         format: 'VTT',
@@ -181,458 +412,182 @@ export const SecurePlayer: React.FC<SecurePlayerProps> = ({
         status: 'valid',
         cues: [
           {
-            id: 'auto-c-en-1',
+            id: 'c-en-1',
             startTime: 0,
-            endTime: 8,
-            speaker: 'CBFC CINEAD',
-            text: `[Certified Theatrical Screening • ${film.title.toUpperCase()}]`,
-            soundEffect: 'Opening overture ♪',
+            endTime: 7,
+            speaker: 'NARRATOR',
+            text: `We have to protect this place for the next generation.`,
+            soundEffect: 'Opening orchestral score ♪',
           },
           {
-            id: 'auto-c-en-2',
-            startTime: 8,
-            endTime: 18,
-            speaker: 'NARRATOR',
-            text: `Theatrical narrative sequence. Production: ${film.productionHouseName}.`,
-            soundEffect: 'Dramatic orchestral crescendo ♪',
+            id: 'c-en-2',
+            startTime: 7,
+            endTime: 16,
+            speaker: 'HERO',
+            text: `No one steps past the sacred eastern gates of the fortress.`,
+            soundEffect: 'Wind sweeping across arena',
+          },
+          {
+            id: 'c-en-3',
+            startTime: 16,
+            endTime: 26,
+            speaker: 'COMMANDER',
+            text: `Three thousand warriors approach Sector 4. Hold the perimeter!`,
+            soundEffect: 'Thunderous engine thrusters ignite ♪',
           },
         ],
       },
-    ];
-  }, [film]);
-
-  const initialCcLang = availableCcTracks.length > 0 ? availableCcTracks[0].languageCode : 'en';
-  const [selectedCcLang, setSelectedCcLang] = useState<string>(initialCcLang);
-  const [ccTheme, setCcTheme] = useState<CCTheme>('yellow-black');
-  const [ccFontSize, setCcFontSize] = useState<CCFontSize>('md');
-  const [ccPosition, setCcPosition] = useState<CCPosition>('bottom');
-  const [ccShowSpeakers, setCcShowSpeakers] = useState<boolean>(true);
-  const [ccShowSoundEffects, setCcShowSoundEffects] = useState<boolean>(true);
-
-  // 5. Audio Description (AD) Configuration
-  const availableAdTracks = useMemo<AccessibilityTrack[]>(() => {
-    if (film.uploadedAdTracks && film.uploadedAdTracks.length > 0) {
-      return film.uploadedAdTracks;
-    }
-    const filmLang = film.languageName || 'Primary Language';
-    const filmCode = film.languageCode || 'native';
-    return [
       {
-        id: `auto-ad-${film.id}-${filmCode}`,
+        id: `auto-cc-${film.id}-hi`,
         filmId: film.id,
-        type: 'AD',
-        languageCode: filmCode,
-        languageName: filmLang,
-        fileUrl: `/storage/tracks/ad_${film.id}_${filmCode}.mp3`,
-        fileName: `ad_${filmCode}.mp3`,
-        format: 'MP3',
+        type: 'CC',
+        languageCode: 'hi',
+        languageName: 'Hindi',
+        fileUrl: `/storage/tracks/cc_${film.id}_hi.srt`,
+        fileName: `cc_hi.srt`,
+        format: 'SRT',
         version: '1.0',
         status: 'valid',
         cues: [
           {
-            id: 'auto-ad-1',
+            id: 'c-hi-1',
             startTime: 0,
-            endTime: 8,
-            text: `Visual Scene Description: The statutory cinema certification emblem appears for ${film.title}. The auditorium settles as the title sequence commences.`,
+            endTime: 7,
+            speaker: 'नायक',
+            text: `हमें आने वाली पीढ़ी के लिए इस पवित्र स्थल की रक्षा करनी होगी।`,
+            soundEffect: 'धीमा गूंजता हुआ वायुमंडलीय संगीत ♪',
           },
           {
-            id: 'auto-ad-2',
-            startTime: 8,
-            endTime: 20,
-            text: `Visual scene description in ${filmLang}: Wide panoramic establishing shot introduces the central dramatic vista under cinematic lighting.`,
+            id: 'c-hi-2',
+            startTime: 7,
+            endTime: 16,
+            speaker: 'भैरव',
+            text: `काशी का यह अंतिम द्वार कोई पार नहीं कर सकता। लक्ष्य सामने है।`,
+            soundEffect: 'इंजन की तीव्र गड़गड़ाहट',
+          },
+        ],
+      },
+      {
+        id: `auto-cc-${film.id}-bn`,
+        filmId: film.id,
+        type: 'CC',
+        languageCode: 'bn',
+        languageName: 'Bengali',
+        fileUrl: `/storage/tracks/cc_${film.id}_bn.srt`,
+        fileName: `cc_bn.srt`,
+        format: 'SRT',
+        version: '1.0',
+        status: 'valid',
+        cues: [
+          {
+            id: 'c-bn-1',
+            startTime: 0,
+            endTime: 7,
+            speaker: 'বর্ণনাকারী',
+            text: `আমাদের আগামী প্রজন্মের জন্য এই স্থানটিকে রক্ষা করতে হবে।`,
+            soundEffect: 'গভীর সুরেলা সংগীত ♪',
+          },
+          {
+            id: 'c-bn-2',
+            startTime: 7,
+            endTime: 16,
+            speaker: 'ভৈরব',
+            text: `এই সীমানা কেউ অতিক্রম করতে পারবে না। আমাদের সংকল্প অটুট।`,
+            soundEffect: 'ঝড়ের গর্জন',
           },
         ],
       },
     ];
   }, [film]);
 
-  const initialAdLang = availableAdTracks.length > 0 ? availableAdTracks[0].languageCode : 'Off';
-  const [selectedAdLang, setSelectedAdLang] = useState<string>(initialAdLang);
-  const [adVolume, setAdVolume] = useState<number>(1.0);
-  const [adSpeechRate, setAdSpeechRate] = useState<number>(1.0);
-  const [adDuckingEnabled, setAdDuckingEnabled] = useState<boolean>(true);
-  const [headphoneConnected, setHeadphoneConnected] = useState<boolean>(false);
-  const [isDuckingActive, setIsDuckingActive] = useState<boolean>(false);
+  const [isCcEnabled, setIsCcEnabled] = useState<boolean>(true);
+  const [selectedCcLang, setSelectedCcLang] = useState<string>(() => {
+    return availableCcTracks.length > 0 ? availableCcTracks[0].languageCode : 'en';
+  });
+  const [isCcDropdownOpen, setIsCcDropdownOpen] = useState<boolean>(false);
 
-  // 6. Quick Options Drawer / Settings Modal
-  const [activeSettingsTab, setActiveSettingsTab] = useState<'cc' | 'ad' | 'sync' | 'source' | 'speed' | 'storage' | null>(null);
-  const [cinemaDimmer, setCinemaDimmer] = useState<number>(0);
-  const [isBlackoutActive, setIsBlackoutActive] = useState<boolean>(false);
+  // Active CC track
+  const currentCcTrack = useMemo(() => {
+    if (!isCcEnabled) return null;
+    return (
+      availableCcTracks.find(
+        (t) =>
+          t.languageCode.toLowerCase() === selectedCcLang.toLowerCase() ||
+          t.id.toLowerCase() === selectedCcLang.toLowerCase()
+      ) ||
+      availableCcTracks[0] ||
+      null
+    );
+  }, [availableCcTracks, selectedCcLang, isCcEnabled]);
 
-  // 7. Mobile QR Pairing
-  const [isQrScannerOpen, setIsQrScannerOpen] = useState<boolean>(false);
-  const [pairedMobileDevice, setPairedMobileDevice] = useState<PairedMobileDevice | null>(null);
+  // Real-time Synchronized Closed Caption Cue: startTime <= currentTime < endTime
+  const activeCcCue = useMemo(() => {
+    if (!isCcEnabled || !currentCcTrack) return null;
+    const cues = currentCcTrack.cues || [];
 
-  // Detect local zero-buffer video blob in sandboxed IndexedDB on startup
-  useEffect(() => {
-    let isMounted = true;
-    const checkLocalVideo = async () => {
-      setIsCheckingLocal(true);
-      try {
-        const hasBlob = await offlineStorage.hasLocalVideoBlob(film.id);
-        if (hasBlob && isMounted) {
-          const blobUrl = await offlineStorage.getLocalBlobUrl(film.id);
-          if (blobUrl && isMounted) {
-            setLocalBlobUrl(blobUrl);
-            setIsLocalBlobActive(true);
-            setShowZeroBufferPrompt(false);
-          }
-        } else if (isMounted) {
-          setIsLocalBlobActive(false);
-          setLocalBlobUrl(null);
-          // Don't interrupt user with blocking modal; play smoothly immediately
-          setShowZeroBufferPrompt(false);
-        }
-      } catch (err) {
-        console.warn('Error checking local video cache:', err);
-      } finally {
-        if (isMounted) setIsCheckingLocal(false);
-      }
-    };
-    checkLocalVideo();
-    return () => {
-      isMounted = false;
-    };
-  }, [film.id, isOfflineMode]);
+    // Direct timestamp match: startTime <= currentTime < endTime
+    const directMatch = cues.find((c) => currentTime >= c.startTime && currentTime < c.endTime);
+    return directMatch || null;
+  }, [isCcEnabled, currentCcTrack, currentTime]);
 
-  // Resolve best video URL: 100% prioritizes local sandboxed blob for ZERO BUFFERING!
-  const resolvedVideoUrl = useMemo(() => {
-    // Priority 1: Zero-Buffer Local Device Sandbox Blob
-    if (localBlobUrl) {
-      return localBlobUrl;
-    }
-
-    if (videoSourceType === 'standard') {
-      return HIGH_COMPATIBILITY_STREAMS[streamFallbackIndex % HIGH_COMPATIBILITY_STREAMS.length];
-    }
-    if (videoSourceType === 'cloud') {
-      if (film.driveFileId) return `/api/drive/stream/${film.driveFileId}`;
-      if (film.videoFileUrl && !film.videoFileUrl.includes('gtv-videos-bucket')) return film.videoFileUrl;
-      return HIGH_COMPATIBILITY_STREAMS[0];
-    }
-    if (videoSourceType === 'original' && film.videoFileUrl && !film.videoFileUrl.includes('gtv-videos-bucket')) {
-      return film.videoFileUrl;
-    }
-
-    // Auto mode with error recovery:
-    if (videoLoadError) {
-      return HIGH_COMPATIBILITY_STREAMS[streamFallbackIndex % HIGH_COMPATIBILITY_STREAMS.length];
-    }
-
-    // Direct video stream if it is a standard playable web format:
-    if (
-      film.videoFileUrl &&
-      !film.videoFileUrl.includes('gtv-videos-bucket') &&
-      !film.videoFileUrl.endsWith('.tar') &&
-      !film.videoFileUrl.endsWith('.mxf') &&
-      !film.videoFileUrl.endsWith('.dcp')
-    ) {
-      return film.videoFileUrl;
-    }
-
-    if (film.driveFileId) {
-      return `/api/drive/stream/${film.driveFileId}`;
-    }
-
-    return HIGH_COMPATIBILITY_STREAMS[0];
-  }, [localBlobUrl, film.videoFileUrl, film.driveFileId, videoSourceType, videoLoadError, streamFallbackIndex]);
-
-  // Zero-Buffer Download Controller
-  const startZeroBufferDownload = async () => {
-    if (isDownloading) return;
-    setIsDownloading(true);
-    setDownloadError(null);
-    setIsDownloadModalOpen(true);
-    setShowZeroBufferPrompt(false);
-
-    // Determine upstream source stream to download
-    const streamToDownload =
-      film.videoFileUrl &&
-      !film.videoFileUrl.endsWith('.tar') &&
-      !film.videoFileUrl.endsWith('.dcp') &&
-      !film.videoFileUrl.includes('gtv-videos-bucket')
-        ? film.videoFileUrl
-        : film.driveFileId
-        ? `/api/drive/stream/${film.driveFileId}`
-        : HIGH_COMPATIBILITY_STREAMS[0];
-
-    const abortCtrl = new AbortController();
-    downloadAbortControllerRef.current = abortCtrl;
-
-    try {
-      const result = await offlineStorage.downloadVideoForZeroBufferPlayback(
-        film.id,
-        film.title,
-        streamToDownload,
-        (progress) => {
-          setDownloadProgress(progress);
-        },
-        film,
-        abortCtrl.signal
-      );
-
-      setLocalBlobUrl(result.blobUrl);
-      setIsLocalBlobActive(true);
-      setIsDownloading(false);
-      setIsBuffering(false);
-
-      // Brief success animation before auto-starting zero-buffer local play
-      setTimeout(() => {
-        setIsDownloadModalOpen(false);
-        if (videoRef.current) {
-          videoRef.current.load();
-          videoRef.current.currentTime = currentTime || 0;
-          setIsBuffering(false);
-          videoRef.current.play().then(() => {
-            setIsPlaying(true);
-            setIsBuffering(false);
-            setHasStartedPlayback(true);
-          }).catch((e) => {
-            console.warn('Local play after download required user gesture:', e);
-          });
-        }
-      }, 500);
-    } catch (err: unknown) {
-      if (abortCtrl.signal.aborted) {
-        setDownloadError('Download cancelled.');
-      } else {
-        setDownloadError(err instanceof Error ? err.message : 'Download failed.');
-      }
-      setIsDownloading(false);
-    }
-  };
-
-  const cancelDownload = () => {
-    if (downloadAbortControllerRef.current) {
-      downloadAbortControllerRef.current.abort();
-    }
-    setIsDownloading(false);
-    setIsDownloadModalOpen(false);
-  };
-
-  const handleDeleteLocalCopy = async () => {
-    await offlineStorage.deleteOfflineFilm(film.id);
-    setLocalBlobUrl(null);
-    setIsLocalBlobActive(false);
-    setIsDownloadModalOpen(false);
-  };
-
-  // When resolved video URL changes, ensure video element properly reloads
-  useEffect(() => {
-    if (videoRef.current) {
-      videoRef.current.load();
-      if (hasStartedPlayback && isPlaying) {
-        videoRef.current.play().catch((e) => {
-          console.warn('Auto-resuming stream after source change:', e);
-        });
-      }
-    }
-  }, [resolvedVideoUrl]);
-
-  // Apply playback speed
-  useEffect(() => {
-    if (videoRef.current) {
-      videoRef.current.playbackRate = playbackSpeed;
-    }
-  }, [playbackSpeed]);
-
-  // Keep CC language synchronized if tracks update
-  useEffect(() => {
-    if (availableCcTracks.length > 0 && selectedCcLang === 'Off') {
-      setSelectedCcLang(availableCcTracks[0].languageCode);
-    }
-  }, [availableCcTracks]);
-
-  // Theatre Audio Sync Controller
-  useEffect(() => {
-    if (playbackMode === 'theatre-sync') {
-      setIsMicSyncActive(true);
-      setShowSyncBar(true);
-      acousticSync.setPlaybackContext(film.id, currentTime);
-
-      acousticSync.startMicrophoneListening(
-        (data: AcousticAnalysisData) => {
-          setSpectrum(data.spectrum);
-          setAmbientDb(data.dbLevel);
-          setSyncConfidence(data.confidenceScore);
-
-          if (data.detectedScene) {
-            setAiSyncScene(data.detectedScene);
-          }
-
-          if (data.confidenceScore > 75) {
-            setSyncStatus('synced');
-          } else if (data.confidenceScore > 40) {
-            setSyncStatus('locking');
-          } else {
-            setSyncStatus('listening');
-          }
-
-          // If AI calculated an acoustic sync timestamp, align playback smoothly
-          if (
-            typeof data.aiSyncedTimestamp === 'number' &&
-            videoRef.current &&
-            Math.abs(videoRef.current.currentTime - data.aiSyncedTimestamp) > 1.2
-          ) {
-            videoRef.current.currentTime = data.aiSyncedTimestamp;
-            setCurrentTime(data.aiSyncedTimestamp);
-          }
-        },
-        film.id,
-        currentTime
-      );
-    } else {
-      // Normal Standalone Mode: Stop microphone sync completely
-      setIsMicSyncActive(false);
-      setShowSyncBar(false);
-      acousticSync.stopListening();
-    }
-
-    return () => {
-      acousticSync.stopListening();
-    };
-  }, [playbackMode, film.id]);
-
-  // Manage movie track volume in theatre sync mode
-  useEffect(() => {
-    if (videoRef.current) {
-      if (playbackMode === 'theatre-sync' && muteMovieAudioInTheatre) {
-        videoRef.current.muted = true;
-      } else {
-        videoRef.current.muted = isMuted;
-        videoRef.current.volume = isMuted ? 0 : filmVolume;
-      }
-    }
-  }, [playbackMode, muteMovieAudioInTheatre, isMuted, filmVolume]);
-
-  // Reset controls timer on user interaction
+  // Controls auto-hide timer
   const resetControlsTimeout = useCallback(() => {
     if (controlsTimeoutRef.current) clearTimeout(controlsTimeoutRef.current);
     setShowControls(true);
-    if (isPlaying && !isTouchLocked) {
+    if (isPlaying) {
       controlsTimeoutRef.current = setTimeout(() => {
         setShowControls(false);
+        setIsAdDropdownOpen(false);
+        setIsCcDropdownOpen(false);
       }, 4000);
     }
-  }, [isPlaying, isTouchLocked]);
+  }, [isPlaying]);
 
-  // Play / Pause with mobile audio unlock and Promise error recovery
+  // Play / Pause Toggle
   const togglePlay = async () => {
-    if (isTouchLocked) return;
-    setHasStartedPlayback(true);
-
-    if (videoRef.current) {
-      if (isPlaying) {
-        videoRef.current.pause();
-        setIsPlaying(false);
-        speechNarrator.stop();
-        setIsDuckingActive(false);
-      } else {
-        try {
-          const playPromise = videoRef.current.play();
-          if (playPromise !== undefined) {
-            await playPromise;
+    if (!videoRef.current) return;
+    if (isPlaying) {
+      videoRef.current.pause();
+      setIsPlaying(false);
+      speechNarrator.stop();
+      setIsDuckingActive(false);
+    } else {
+      try {
+        await videoRef.current.play();
+        setIsPlaying(true);
+        setIsBuffering(false);
+        resetControlsTimeout();
+      } catch (err) {
+        console.warn('Direct unmuted play blocked by browser, auto-attempting muted play:', err);
+        if (videoRef.current) {
+          videoRef.current.muted = true;
+          setIsMuted(true);
+          try {
+            await videoRef.current.play();
             setIsPlaying(true);
             setIsBuffering(false);
-            resetControlsTimeout();
-          }
-        } catch (err: unknown) {
-          console.warn('Playback audio blocked by mobile policy, falling back to muted play:', err);
-          // Auto retry with muted audio if unmuted playback was blocked by mobile browser
-          if (videoRef.current) {
-            videoRef.current.muted = true;
-            setIsMuted(true);
-            setShowUnmutePrompt(true);
-            try {
-              await videoRef.current.play();
-              setIsPlaying(true);
-              setIsBuffering(false);
-            } catch (e) {
-              console.error('Mobile video play failure:', e);
-              setVideoLoadError('Stream connection stalled. Tap below to use High-Compatibility MP4 Stream.');
-            }
+          } catch (e) {
+            console.error('Video play failure:', e);
+            setVideoLoadError('Playback was interrupted. Click Retry Playback to reload.');
           }
         }
       }
     }
   };
 
-  const handleUnmuteAudio = () => {
-    if (videoRef.current) {
-      videoRef.current.muted = false;
-      setIsMuted(false);
-      setShowUnmutePrompt(false);
-    }
+  // Seek handler
+  const handleSeek = (newTime: number) => {
+    if (!videoRef.current) return;
+    const max = duration || 100;
+    const clamped = Math.max(0, Math.min(max, newTime));
+    videoRef.current.currentTime = clamped;
+    setCurrentTime(clamped);
+    speechNarrator.resetLastCue();
+    speechNarrator.stop();
   };
 
-  const handleTimeUpdate = () => {
-    if (videoRef.current) {
-      const cur = videoRef.current.currentTime;
-      setCurrentTime(cur);
-      const dur = videoRef.current.duration;
-      if (dur && !isNaN(dur) && dur > 0) {
-        setDuration(dur);
-      } else if (!duration) {
-        setDuration((film.durationMinutes || 120) * 60);
-      }
-      if (playbackMode === 'theatre-sync') {
-        acousticSync.setPlaybackContext(film.id, cur);
-      }
-    }
-  };
-
-  const handleSeek = (time: number) => {
-    if (videoRef.current) {
-      const maxSec = duration || (film.durationMinutes || 120) * 60;
-      const clamped = Math.max(0, Math.min(maxSec, time));
-      videoRef.current.currentTime = clamped;
-      setCurrentTime(clamped);
-      speechNarrator.resetLastCue();
-    }
-  };
-
-  const handleSkip = (deltaSeconds: number) => {
-    handleSeek(currentTime + deltaSeconds);
-    setSeekFeedback({
-      text: deltaSeconds > 0 ? `+${deltaSeconds}s` : `${deltaSeconds}s`,
-      side: deltaSeconds > 0 ? 'right' : 'left',
-    });
-    setTimeout(() => setSeekFeedback(null), 700);
-  };
-
-  // Touch gesture handler for mobile screens
-  const handleViewportTap = (e: React.MouseEvent<HTMLDivElement> | React.TouchEvent<HTMLDivElement>) => {
-    if (isTouchLocked) return;
-    const now = Date.now();
-    const rect = containerRef.current?.getBoundingClientRect();
-    if (!rect) {
-      togglePlay();
-      return;
-    }
-
-    const clientX = 'touches' in e && e.touches.length > 0 ? e.touches[0].clientX : (e as React.MouseEvent).clientX;
-    const clickX = clientX - rect.left;
-    const third = rect.width / 3;
-
-    let side: 'left' | 'right' | 'center' = 'center';
-    if (clickX < third) side = 'left';
-    else if (clickX > third * 2) side = 'right';
-
-    // Double tap detection
-    if (now - lastTapTimeRef.current.time < 350 && lastTapTimeRef.current.side === side) {
-      if (side === 'left') {
-        handleSkip(-10);
-      } else if (side === 'right') {
-        handleSkip(10);
-      } else {
-        togglePlay();
-      }
-      lastTapTimeRef.current = { time: 0, side: 'center' };
-      return;
-    }
-
-    lastTapTimeRef.current = { time: now, side };
-    resetControlsTimeout();
+  const handleSkip = (delta: number) => {
+    handleSeek(currentTime + delta);
   };
 
   const toggleFullscreen = () => {
@@ -646,186 +601,35 @@ export const SecurePlayer: React.FC<SecurePlayerProps> = ({
     }
   };
 
-  // Calculate effective time adjusted by acoustic sync fine offset (in ms)
-  const effectivePlaybackTime = useMemo(() => {
-    return Math.max(0, currentTime + syncOffsetMs / 1000);
-  }, [currentTime, syncOffsetMs]);
-
-  // Find active CC Track with case-insensitive matching
-  const currentCcTrack = useMemo(() => {
-    if (selectedCcLang === 'Off') return null;
-    return (
-      availableCcTracks.find(
-        (t) =>
-          t.languageCode.toLowerCase() === selectedCcLang.toLowerCase() ||
-          t.id === selectedCcLang
-      ) ||
-      availableCcTracks[0] ||
-      null
-    );
-  }, [availableCcTracks, selectedCcLang]);
-
-  // Continuous Subtitle Cue Engine: Guarantees Closed Captions are ALWAYS showing and never blank
-  const activeCcCue = useMemo(() => {
-    if (selectedCcLang === 'Off' || !currentCcTrack) return null;
-
-    const cues = currentCcTrack.cues || [];
-
-    // 1. Direct match on cue timestamp:
-    const directMatch = cues.find(
-      (c) => effectivePlaybackTime >= c.startTime && effectivePlaybackTime <= c.endTime
-    );
-    if (directMatch) return directMatch;
-
-    // 2. Looped match across defined cues:
-    if (cues.length > 0) {
-      const maxCueEnd = Math.max(...cues.map((c) => c.endTime));
-      if (maxCueEnd > 0) {
-        const loopTime = effectivePlaybackTime % maxCueEnd;
-        const loopedMatch = cues.find((c) => loopTime >= c.startTime && loopTime <= c.endTime);
-        if (loopedMatch) return loopedMatch;
-      }
-    }
-
-    // 3. Dynamic Theatrical Accessibility Subtitle Generation for gaps & continuous playback
-    const sec = Math.floor(effectivePlaybackTime);
-    const cycle = sec % 32;
-    const langName = currentCcTrack.languageName || film.languageName || 'Theatrical';
-
-    if (cycle < 7) {
-      return {
-        id: `auto-cue-1-${sec}`,
-        startTime: sec,
-        endTime: sec + 7,
-        speaker: film.director ? film.director.toUpperCase() : 'LEAD PROTAGONIST',
-        text: `[Dialogue Sequence in ${langName}: Key cinematic narration continues]`,
-        soundEffect: 'Auditorium ambient music score ♪',
-      };
-    }
-    if (cycle < 15) {
-      return {
-        id: `auto-cue-2-${sec}`,
-        startTime: sec,
-        endTime: sec + 8,
-        speaker: 'SUPPORTING CAST',
-        text: `Theatrical narrative sequence in ${langName}.`,
-        soundEffect: 'Low-frequency bass reverberation',
-      };
-    }
-    if (cycle < 23) {
-      return {
-        id: `auto-cue-3-${sec}`,
-        startTime: sec,
-        endTime: sec + 8,
-        soundEffect: 'Orchestral overture swelling ♪',
-        text: '[CINEMATIC DRAMATIC SCORE] [SUBTERRANEAN ECHO]',
-      };
-    }
-    return {
-      id: `auto-cue-4-${sec}`,
-      startTime: sec,
-      endTime: sec + 9,
-      speaker: 'NARRATOR',
-      text: `Critical plot progression in ${langName}.`,
-      soundEffect: 'Atmospheric strings ♪',
-    };
-  }, [selectedCcLang, currentCcTrack, effectivePlaybackTime, film]);
-
-  // Active Audio Description Track & Continuous Cue
-  const currentAdTrack = useMemo(() => {
-    if (selectedAdLang === 'Off') return null;
-    return (
-      availableAdTracks.find(
-        (t) =>
-          t.languageCode.toLowerCase() === selectedAdLang.toLowerCase() ||
-          t.id === selectedAdLang
-      ) ||
-      availableAdTracks[0] ||
-      null
-    );
-  }, [availableAdTracks, selectedAdLang]);
-
-  const activeAdCue = useMemo(() => {
-    if (selectedAdLang === 'Off' || !currentAdTrack) return null;
-    const cues = currentAdTrack.cues || [];
-    const directMatch = cues.find(
-      (c) => effectivePlaybackTime >= c.startTime && effectivePlaybackTime <= c.endTime
-    );
-    if (directMatch) return directMatch;
-
-    if (cues.length > 0) {
-      const maxEnd = Math.max(...cues.map((c) => c.endTime));
-      if (maxEnd > 0) {
-        const loopTime = effectivePlaybackTime % maxEnd;
-        const loopedMatch = cues.find((c) => loopTime >= c.startTime && loopTime <= c.endTime);
-        if (loopedMatch) return loopedMatch;
-      }
-    }
-
-    return null;
-  }, [selectedAdLang, currentAdTrack, effectivePlaybackTime]);
-
-  // Speech Narration with Audio Ducking
-  useEffect(() => {
-    if (activeAdCue && selectedAdLang !== 'Off' && isPlaying) {
-      if (adDuckingEnabled && videoRef.current) {
-        videoRef.current.volume = Math.max(0.15, filmVolume * 0.25);
-        setIsDuckingActive(true);
-      }
-
-      speechNarrator.speak(
-        activeAdCue.id,
-        activeAdCue.text,
-        currentAdTrack?.languageName || 'English',
-        adSpeechRate,
-        adVolume
+  // Zero-Buffer Download Controller
+  const startZeroBufferDownload = async () => {
+    if (isDownloading) return;
+    setIsDownloading(true);
+    setIsDownloadModalOpen(true);
+    try {
+      const streamUrl = film.videoFileUrl && !film.videoFileUrl.includes('gtv-videos-bucket')
+        ? film.videoFileUrl
+        : '/videos/theatrical_master_kalki.mp4';
+      const result = await offlineStorage.downloadVideoForZeroBufferPlayback(
+        film.id,
+        film.title,
+        streamUrl,
+        (prog) => setDownloadProgress(prog),
+        film
       );
-
-      const cueDurationMs = Math.max(2500, (activeAdCue.endTime - activeAdCue.startTime) * 1000);
-      const timer = setTimeout(() => {
-        if (videoRef.current && !isMuted) {
-          videoRef.current.volume = filmVolume;
-          setIsDuckingActive(false);
-        }
-      }, cueDurationMs);
-
-      return () => clearTimeout(timer);
-    }
-  }, [activeAdCue, selectedAdLang, isPlaying, adDuckingEnabled, filmVolume, adSpeechRate, adVolume, currentAdTrack, isMuted]);
-
-  // Closed Caption Styling Helpers
-  const getCcThemeClass = () => {
-    switch (ccTheme) {
-      case 'yellow-black':
-        return 'bg-black/95 text-amber-300 border border-amber-500/40 shadow-2xl';
-      case 'white-black':
-        return 'bg-black/95 text-white border border-neutral-700 shadow-2xl';
-      case 'cyan-dark':
-        return 'bg-neutral-950/95 text-cyan-300 border border-cyan-500/40 shadow-2xl';
-      case 'black-white':
-        return 'bg-neutral-100/95 text-neutral-950 border border-neutral-300 font-bold shadow-2xl';
-      default:
-        return 'bg-black/95 text-amber-300 border border-amber-500/40 shadow-2xl';
+      setLocalBlobUrl(result.blobUrl);
+      setIsLocalBlobActive(true);
+      setIsDownloading(false);
+      setTimeout(() => setIsDownloadModalOpen(false), 500);
+    } catch (err) {
+      console.error('Download error:', err);
+      setIsDownloading(false);
     }
   };
 
-  const getCcFontSizeClass = () => {
-    switch (ccFontSize) {
-      case 'sm':
-        return 'text-xs sm:text-sm';
-      case 'md':
-        return 'text-sm sm:text-base md:text-lg';
-      case 'lg':
-        return 'text-base sm:text-lg md:text-xl font-bold';
-      case 'xl':
-        return 'text-lg sm:text-xl md:text-2xl font-black';
-      default:
-        return 'text-sm sm:text-base md:text-lg';
-    }
-  };
-
-  const formatTime = (secs: number) => {
-    const total = Math.floor(Math.max(0, secs));
+  // Time format helper (hh:mm:ss or mm:ss)
+  const formatTime = (seconds: number) => {
+    const total = Math.floor(Math.max(0, seconds));
     const h = Math.floor(total / 3600);
     const m = Math.floor((total % 3600) / 60);
     const s = total % 60;
@@ -839,1221 +643,997 @@ export const SecurePlayer: React.FC<SecurePlayerProps> = ({
     <div
       ref={containerRef}
       onMouseMove={resetControlsTimeout}
-      onTouchStart={resetControlsTimeout}
-      className="fixed inset-0 z-50 bg-black flex flex-col justify-between overflow-hidden select-none font-sans"
+      onClick={() => {
+        setIsAdDropdownOpen(false);
+        setIsCcDropdownOpen(false);
+      }}
+      className="fixed inset-0 z-50 bg-neutral-950/98 text-neutral-100 flex flex-col overflow-y-auto selection:bg-amber-500 selection:text-neutral-950 font-sans"
     >
-      {/* CINEMA OLED BLACKOUT OVERLAY */}
-      {isBlackoutActive && (
-        <div
-          onClick={() => setIsBlackoutActive(false)}
-          className="absolute inset-0 z-50 bg-black flex flex-col items-center justify-center p-6 text-center cursor-pointer animate-fadeIn"
-        >
-          <div className="w-16 h-16 rounded-full bg-neutral-900 border border-purple-500/40 flex items-center justify-center text-purple-400 mb-4 animate-pulse">
-            <Moon className="w-8 h-8" />
-          </div>
-          <h2 className="text-xl sm:text-2xl font-black text-white uppercase tracking-wider mb-2">
-            AUDITORIUM OLED BLACKOUT ACTIVE
-          </h2>
-          <p className="text-xs sm:text-sm text-neutral-400 max-w-md leading-relaxed mb-6">
-            Display dimmed to 100% pure black to eliminate screen glare inside movie theaters. Audio Description, subtitles, and acoustic sync remain active.
-          </p>
-          <span className="px-4 py-2 rounded-xl bg-purple-950/80 border border-purple-600/50 text-purple-300 text-xs font-mono font-bold">
-            TAP ANYWHERE TO RESTORE DISPLAY
-          </span>
-        </div>
-      )}
-
-      {/* SCREEN DIMMER FILTER */}
-      {cinemaDimmer > 0 && (
-        <div
-          className="absolute inset-0 pointer-events-none z-30 bg-black transition-opacity"
-          style={{ opacity: cinemaDimmer }}
-        />
-      )}
-
-      {/* STATUTORY WATERMARK OVERLAY */}
-      <div className="absolute top-4 right-4 z-20 pointer-events-none opacity-40 font-mono text-[9px] sm:text-[11px] text-amber-300 uppercase tracking-widest text-right">
-        <div>{watermark}</div>
-        <div>SESSION: {sessionToken.slice(0, 16)}...</div>
-      </div>
-
-      {/* TOP FLOATING CINEMA HEADER */}
-      <div
-        className={`p-3 sm:p-5 bg-gradient-to-b from-black/95 via-black/75 to-transparent z-40 flex items-center justify-between gap-3 transition-opacity duration-300 ${
-          showControls && !isTouchLocked ? 'opacity-100' : 'opacity-0 pointer-events-none'
-        }`}
-      >
-        <div className="flex items-center gap-2.5 sm:gap-3">
-          <div className="w-9 h-9 sm:w-10 sm:h-10 rounded-xl bg-amber-500/20 border border-amber-500/40 flex items-center justify-center text-amber-400 shadow-lg shadow-amber-500/10 shrink-0">
-            <FilmIcon className="w-4 h-4 sm:w-5 sm:h-5" />
-          </div>
-          <div>
-            <div className="flex items-center gap-1.5 sm:gap-2 flex-wrap">
-              <h1 className="text-xs sm:text-base font-black text-white tracking-wide uppercase line-clamp-1">
-                {film.title}
-              </h1>
-              <span className="text-[9px] sm:text-[10px] font-mono px-2 py-0.5 rounded bg-amber-500/15 border border-amber-500/40 text-amber-300 font-bold">
-                {film.languageName}
-              </span>
-              <span className="text-[9px] sm:text-[10px] font-mono px-1.5 py-0.5 rounded bg-neutral-900 border border-neutral-700 text-neutral-300 hidden sm:inline">
-                {film.cbfcCertNo || 'CBFC CERTIFIED'}
-              </span>
+      {/* ============================================================== */}
+      {/* TOP APPLICATION / PLATFORM NAVIGATION BAR */}
+      {/* ============================================================== */}
+      <header className="sticky top-0 z-40 bg-neutral-950/95 backdrop-blur-md border-b border-neutral-800 px-4 sm:px-6 py-3 flex items-center justify-between gap-4">
+        {/* Logo & Brand */}
+        <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2">
+            <div className="w-8 h-8 rounded-xl bg-amber-500 flex items-center justify-center text-neutral-950 font-black shadow-md shadow-amber-500/20">
+              <FilmIcon className="w-4 h-4 fill-current" />
             </div>
-            <p className="text-[10px] sm:text-[11px] text-neutral-400 hidden md:block">
-              {film.productionHouseName} • Dir: {film.director}
-            </p>
+            <span className="text-base sm:text-lg font-black tracking-wider text-white">
+              CINE<span className="text-amber-400">AD</span>
+            </span>
           </div>
+
+          {/* Desktop Navigation Links */}
+          <nav className="hidden md:flex items-center gap-5 ml-6 text-xs font-semibold text-neutral-400">
+            <span className="text-amber-400 font-bold">Home</span>
+            <span className="hover:text-white transition-colors cursor-pointer">Films</span>
+            <span className="hover:text-white transition-colors cursor-pointer">My Watchlist</span>
+            <span className="hover:text-white transition-colors cursor-pointer">Accessibility</span>
+            <span className="hover:text-white transition-colors cursor-pointer">Profile</span>
+          </nav>
         </div>
 
-        {/* Dual Mode Switcher & Quick Cinema Controls */}
-        <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
-          {/* Mode Switcher: Normal Standalone vs AI Theatre Sync */}
-          {/* Requirement: If not in theatre, play normally without syncing! When in theatre, sync with AI! */}
-          <div className="flex items-center bg-neutral-900/90 p-0.5 sm:p-1 rounded-xl border border-neutral-800 text-[10px] sm:text-xs font-mono">
+        {/* Right Controls: Platform Switcher (Website vs Mobile App) + User Profile + Close */}
+        <div className="flex items-center gap-2 sm:gap-3">
+          {/* Platform Mode Selector (Website vs App) */}
+          <div className="flex items-center bg-neutral-900 p-0.5 rounded-xl border border-neutral-800 text-[11px] font-mono">
             <button
-              onClick={() => setPlaybackMode('normal')}
-              className={`px-2 sm:px-3 py-1 rounded-lg flex items-center gap-1 transition-all ${
-                playbackMode === 'normal'
+              onClick={() => handleSwitchPlatformView('website')}
+              className={`px-2.5 py-1 rounded-lg flex items-center gap-1.5 transition-all ${
+                activePlatformView === 'website'
                   ? 'bg-amber-500 text-neutral-950 font-bold shadow-sm'
                   : 'text-neutral-400 hover:text-white'
               }`}
-              title="Normal Play: Plays video normally without microphone or theatre sync (Standard mobile/website mode)"
+              title="Desktop Website Playback Interface"
             >
-              <Smartphone className="w-3.5 h-3.5" />
-              <span>Normal Play</span>
+              <Globe className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">Desktop Website</span>
+              <span className="sm:hidden">Web</span>
             </button>
             <button
-              onClick={() => setPlaybackMode('theatre-sync')}
-              className={`px-2 sm:px-3 py-1 rounded-lg flex items-center gap-1 transition-all ${
-                playbackMode === 'theatre-sync'
-                  ? 'bg-emerald-500 text-neutral-950 font-bold shadow-sm'
+              onClick={() => handleSwitchPlatformView('app')}
+              className={`px-2.5 py-1 rounded-lg flex items-center gap-1.5 transition-all ${
+                activePlatformView === 'app'
+                  ? 'bg-amber-500 text-neutral-950 font-bold shadow-sm'
                   : 'text-neutral-400 hover:text-white'
               }`}
-              title="Theatre Audio Sync (AI): Uses microphone to automatically sync video & captions with auditorium big screen"
+              title="Mobile App Playback Interface"
             >
-              <Radio className="w-3.5 h-3.5 text-inherit animate-pulse" />
-              <span className="hidden min-[420px]:inline">Sync with Theatre (AI)</span>
-              <span className="min-[420px]:hidden">AI Sync</span>
+              <Smartphone className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">Mobile App</span>
+              <span className="sm:hidden">App</span>
             </button>
           </div>
 
-          {/* Zero-Buffer Local Device Playback Status & Action */}
-          {isLocalBlobActive ? (
-            <button
-              onClick={() => setIsDownloadModalOpen(true)}
-              className="px-2.5 sm:px-3 py-1.5 rounded-xl bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-500/40 text-emerald-300 text-[10px] sm:text-xs font-mono font-bold flex items-center gap-1.5 shadow-sm transition-all"
-              title="Zero-Buffer Local Playback Active (Loaded from device sandbox). Tap for storage info."
-            >
-              <Zap className="w-3.5 h-3.5 text-emerald-400 fill-emerald-400 animate-pulse" />
-              <span className="hidden min-[480px]:inline">ZERO BUFFER (LOCAL)</span>
-              <span className="min-[480px]:hidden">LOCAL</span>
-            </button>
-          ) : (
-            <button
-              onClick={startZeroBufferDownload}
-              className="px-2.5 sm:px-3 py-1.5 rounded-xl bg-amber-500/15 hover:bg-amber-500 text-amber-300 hover:text-neutral-950 border border-amber-500/40 text-[10px] sm:text-xs font-mono font-bold flex items-center gap-1.5 shadow-sm transition-all"
-              title="Download to local device before viewing to eliminate buffering"
-            >
-              <Download className="w-3.5 h-3.5 text-amber-400" />
-              <span className="hidden min-[480px]:inline">DOWNLOAD (ZERO BUFFER)</span>
-              <span className="min-[480px]:hidden">DOWNLOAD</span>
-            </button>
-          )}
+          {/* User Name & Avatar */}
+          <div className="hidden sm:flex items-center gap-2 px-2.5 py-1 rounded-xl bg-neutral-900 border border-neutral-800 text-xs">
+            <div className="w-6 h-6 rounded-full bg-neutral-800 flex items-center justify-center text-neutral-300">
+              <UserIcon className="w-3.5 h-3.5" />
+            </div>
+            <span className="text-neutral-200 font-medium truncate max-w-[120px]">
+              {currentUser?.productionHouseName || 'User Account'}
+            </span>
+          </div>
 
-          {/* Touch Lock Toggle (Prevents accidental touches in theater/pocket) */}
-          <button
-            onClick={() => setIsTouchLocked(!isTouchLocked)}
-            className={`p-2 rounded-xl border transition-colors ${
-              isTouchLocked
-                ? 'bg-amber-500 text-neutral-950 border-amber-400'
-                : 'bg-neutral-900/90 hover:bg-neutral-800 text-neutral-300 border-neutral-800'
-            }`}
-            title={isTouchLocked ? 'Screen Locked (Tap to Unlock)' : 'Lock Touch Screen'}
-          >
-            {isTouchLocked ? <Lock className="w-4 h-4" /> : <Unlock className="w-4 h-4" />}
-          </button>
-
-          {/* Close Player */}
+          {/* Close Screening Button */}
           <button
             onClick={onClose}
-            className="p-2 rounded-xl bg-neutral-900/90 hover:bg-neutral-800 border border-neutral-800 text-neutral-300 hover:text-white transition-colors"
-            title="Exit Screening"
+            className="p-2 rounded-xl bg-neutral-900 hover:bg-neutral-800 text-neutral-400 hover:text-white border border-neutral-800 transition-colors"
+            title="Exit Player"
           >
             <X className="w-4 h-4" />
           </button>
         </div>
-      </div>
+      </header>
 
-      {/* AI THEATRICAL AUDIO SYNC HUD (Only in Theatre Sync Mode) */}
-      {playbackMode === 'theatre-sync' && (
-        <div className="px-3 sm:px-4 py-2 bg-neutral-950/95 border-b border-emerald-500/40 backdrop-blur-md z-40 flex flex-wrap items-center justify-between gap-2.5 text-xs font-mono">
-          <div className="flex items-center gap-2 text-emerald-400 font-bold">
-            <Radio className="w-4 h-4 animate-pulse text-emerald-400 shrink-0" />
-            <span className="text-[11px] sm:text-xs">
-              AI THEATRE SYNC ACTIVE ({syncConfidence}% MATCH)
-            </span>
-            <span className="text-neutral-400 font-normal hidden md:inline">• {aiSyncScene}</span>
-          </div>
+      {/* ============================================================== */}
+      {/* MAIN PLAYBACK VIEWPORT: SUPPORTS DESKTOP WEBSITE & MOBILE APP */}
+      {/* ============================================================== */}
+      <main className="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6 lg:p-8 space-y-6">
+        {/* ------------------------------------------------------------ */}
+        {/* DESKTOP WEBSITE PLAYBACK INTERFACE */}
+        {/* ------------------------------------------------------------ */}
+        {activePlatformView === 'website' ? (
+          <div className="space-y-6 animate-fadeIn">
+            {/* Film Title Header */}
+            <div>
+              <h1 className="text-2xl sm:text-3xl font-black text-white tracking-tight uppercase">
+                {film.title}
+              </h1>
+              <p className="text-xs sm:text-sm text-neutral-400 mt-1 font-mono">
+                Directed by {film.director || 'Director'} &nbsp;|&nbsp; 2024 &nbsp;|&nbsp;{' '}
+                {film.durationMinutes ? `${Math.floor(film.durationMinutes / 60)}h ${film.durationMinutes % 60}m` : '2h 15m'}
+              </p>
+            </div>
 
-          <div className="flex items-center gap-2 sm:gap-3 flex-wrap">
-            {/* Live Audio Spectrum Equalizer */}
-            <div className="flex items-center gap-1.5">
-              <span className="text-[10px] text-neutral-400 hidden sm:inline">SPECTRUM:</span>
-              <div className="flex items-end gap-0.5 h-3.5 w-18 sm:w-24 bg-neutral-900 px-1 py-0.5 rounded border border-neutral-800">
-                {spectrum.slice(0, 10).map((val, idx) => (
-                  <div
-                    key={idx}
-                    className="flex-1 bg-emerald-400 rounded-xs transition-all duration-75"
-                    style={{ height: `${Math.max(15, Math.round(val * 100))}%` }}
+            {/* THREE SECTIONS IN TOP PLAYBACK AREA */}
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-stretch">
+              {/* SECTION 1: MAIN VIDEO PLAYER (Span 7 cols on desktop) */}
+              <div className="lg:col-span-7 flex flex-col rounded-2xl bg-neutral-900/90 border border-neutral-800 overflow-hidden shadow-2xl">
+                {/* Section 1 Header */}
+                <div className="px-4 py-3 bg-neutral-900 border-b border-neutral-800 flex items-center gap-2.5">
+                  <div className="w-6 h-6 rounded-full bg-blue-600 text-white font-black text-xs flex items-center justify-center shrink-0">
+                    1
+                  </div>
+                  <div>
+                    <h3 className="text-xs sm:text-sm font-bold text-white tracking-wide">Video Player</h3>
+                    <p className="text-[10px] text-neutral-400">Main film playback area</p>
+                  </div>
+                </div>
+
+                {/* Section 1 Video Container */}
+                <div className="relative aspect-video bg-black flex items-center justify-center overflow-hidden group">
+                  <video
+                    ref={videoRef}
+                    src={resolvedVideoUrl}
+                    onTimeUpdate={() => {
+                      if (videoRef.current) {
+                        setCurrentTime(videoRef.current.currentTime);
+                        const dur = videoRef.current.duration;
+                        if (dur && !isNaN(dur) && dur > 0) setDuration(dur);
+                      }
+                    }}
+                    onWaiting={() => {
+                      if (!isLocalBlobActive) setIsBuffering(true);
+                    }}
+                    onPlaying={() => {
+                      setIsPlaying(true);
+                      setIsBuffering(false);
+                    }}
+                    onCanPlay={() => setIsBuffering(false)}
+                    onCanPlayThrough={() => setIsBuffering(false)}
+                    onLoadedMetadata={() => {
+                      setIsBuffering(false);
+                      if (videoRef.current?.duration) setDuration(videoRef.current.duration);
+                    }}
+                    onEnded={() => {
+                      setIsPlaying(false);
+                      speechNarrator.stop();
+                      speechNarrator.resetLastCue();
+                    }}
+                    onSeeked={() => {
+                      speechNarrator.stop();
+                      speechNarrator.resetLastCue();
+                    }}
+                    onError={() => {
+                      console.warn('Video playback error, activating fallback stream');
+                      if (isLocalBlobActive) {
+                        setLocalBlobUrl(null);
+                        setIsLocalBlobActive(false);
+                      }
+                      setStreamFallbackIndex((prev) => prev + 1);
+                      setVideoLoadError('Playback error encountered. Using high-compatibility backup stream.');
+                    }}
+                    playsInline
+                    preload="auto"
+                    className="w-full h-full object-contain"
                   />
-                ))}
+
+                  {/* Buffering Spinner */}
+                  {isBuffering && !isLocalBlobActive && (
+                    <div className="absolute inset-0 bg-black/60 flex flex-col items-center justify-center z-20">
+                      <Loader2 className="w-10 h-10 text-amber-500 animate-spin mb-2" />
+                      <span className="text-xs font-mono text-amber-300">Buffering Stream...</span>
+                    </div>
+                  )}
+
+                  {/* Playback Error Recovery Banner */}
+                  {videoLoadError && (
+                    <div className="absolute top-3 inset-x-3 z-30 p-2.5 rounded-xl bg-neutral-950/95 border border-amber-500/60 flex items-center justify-between gap-2 text-xs font-mono text-amber-300 shadow-xl">
+                      <div className="flex items-center gap-1.5">
+                        <AlertCircle className="w-4 h-4 text-amber-400 shrink-0" />
+                        <span className="line-clamp-1">{videoLoadError}</span>
+                      </div>
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setVideoLoadError(null);
+                          setStreamFallbackIndex((prev) => prev + 1);
+                          if (videoRef.current) videoRef.current.load();
+                        }}
+                        className="px-2.5 py-1 rounded-lg bg-amber-500 text-neutral-950 font-bold text-[11px] shrink-0"
+                      >
+                        Retry Playback
+                      </button>
+                    </div>
+                  )}
+
+                  {/* Statutory Watermark */}
+                  <div className="absolute top-2.5 right-2.5 z-20 pointer-events-none opacity-40 font-mono text-[9px] text-amber-300">
+                    {watermark}
+                  </div>
+
+                  {/* Video Controls Bar Overlay */}
+                  <div
+                    className={`absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/95 via-black/80 to-transparent p-3 pt-6 z-30 flex flex-col gap-2 transition-opacity duration-200 ${
+                      showControls ? 'opacity-100' : 'opacity-0 pointer-events-none'
+                    }`}
+                  >
+                    {/* Scrubber Timeline */}
+                    <input
+                      type="range"
+                      min={0}
+                      max={duration || 100}
+                      step={0.1}
+                      value={currentTime}
+                      onChange={(e) => handleSeek(parseFloat(e.target.value))}
+                      className="w-full h-1.5 bg-neutral-700 rounded-lg appearance-none cursor-pointer accent-amber-500"
+                    />
+
+                    {/* Controls Row */}
+                    <div className="flex items-center justify-between text-white text-xs">
+                      {/* Left: Play/Pause, Timestamp, Volume */}
+                      <div className="flex items-center gap-2 sm:gap-3">
+                        <button
+                          onClick={togglePlay}
+                          className="p-1.5 rounded-lg hover:bg-neutral-800 text-white transition-colors"
+                          title={isPlaying ? 'Pause' : 'Play'}
+                        >
+                          {isPlaying ? <Pause className="w-4 h-4 fill-current" /> : <Play className="w-4 h-4 fill-current" />}
+                        </button>
+
+                        <span className="font-mono text-[11px] text-neutral-300">
+                          {formatTime(currentTime)} / {formatTime(duration)}
+                        </span>
+
+                        <div className="flex items-center gap-1.5">
+                          <button
+                            onClick={() => setIsMuted(!isMuted)}
+                            className="p-1 hover:text-amber-400 transition-colors"
+                          >
+                            {isMuted ? <VolumeX className="w-4 h-4 text-rose-400" /> : <Volume2 className="w-4 h-4" />}
+                          </button>
+                          <input
+                            type="range"
+                            min={0}
+                            max={1}
+                            step={0.05}
+                            value={isMuted ? 0 : volume}
+                            onChange={(e) => {
+                              const v = parseFloat(e.target.value);
+                              setVolume(v);
+                              setIsMuted(false);
+                            }}
+                            className="w-14 sm:w-20 h-1 bg-neutral-700 rounded appearance-none accent-amber-500"
+                          />
+                        </div>
+                      </div>
+
+                      {/* Right: CC, Settings, Fullscreen */}
+                      <div className="flex items-center gap-1.5">
+                        <button
+                          onClick={() => setIsCcEnabled(!isCcEnabled)}
+                          className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold border transition-colors ${
+                            isCcEnabled
+                              ? 'bg-purple-600 text-white border-purple-500'
+                              : 'bg-neutral-800 text-neutral-400 border-neutral-700'
+                          }`}
+                          title={isCcEnabled ? 'Disable Closed Captions' : 'Enable Closed Captions'}
+                        >
+                          CC
+                        </button>
+                        <button
+                          onClick={() => setShowSettingsDrawer(!showSettingsDrawer)}
+                          className="p-1.5 hover:text-amber-400 text-neutral-300 transition-colors"
+                          title="Playback Options"
+                        >
+                          <Settings className="w-4 h-4" />
+                        </button>
+                        <button
+                          onClick={toggleFullscreen}
+                          className="p-1.5 hover:text-amber-400 text-neutral-300 transition-colors"
+                          title="Fullscreen"
+                        >
+                          {isFullscreen ? <Minimize className="w-4 h-4" /> : <Maximize className="w-4 h-4" />}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Settings Drawer (Speed, Zero Buffer) */}
+                {showSettingsDrawer && (
+                  <div className="p-3 bg-neutral-950 border-t border-neutral-800 text-xs flex flex-wrap items-center justify-between gap-3 font-mono animate-fadeIn">
+                    <div className="flex items-center gap-2">
+                      <span className="text-neutral-400 text-[11px]">SPEED:</span>
+                      {[0.75, 1.0, 1.25, 1.5].map((rate) => (
+                        <button
+                          key={rate}
+                          onClick={() => setPlaybackSpeed(rate)}
+                          className={`px-2 py-0.5 rounded text-[11px] ${
+                            playbackSpeed === rate ? 'bg-amber-500 text-neutral-950 font-bold' : 'bg-neutral-850 text-neutral-400'
+                          }`}
+                        >
+                          {rate}x
+                        </button>
+                      ))}
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      {isLocalBlobActive ? (
+                        <span className="text-emerald-400 text-[11px] flex items-center gap-1 font-bold">
+                          <Check className="w-3.5 h-3.5" />
+                          <span>Zero Buffer Active</span>
+                        </span>
+                      ) : (
+                        <button
+                          onClick={startZeroBufferDownload}
+                          className="px-2.5 py-1 rounded-lg bg-amber-500/20 text-amber-300 hover:bg-amber-500 hover:text-neutral-950 border border-amber-500/40 text-[11px] font-bold flex items-center gap-1 transition-all"
+                        >
+                          <Download className="w-3 h-3" />
+                          <span>Download (Zero Buffer)</span>
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                )}
               </div>
-              <span className="text-[10px] text-neutral-400">{ambientDb} dB</span>
-            </div>
 
-            {/* Mute Movie Audio in Theatre Toggle */}
-            <button
-              onClick={() => setMuteMovieAudioInTheatre(!muteMovieAudioInTheatre)}
-              className={`px-2 py-0.5 rounded text-[10px] border flex items-center gap-1 ${
-                muteMovieAudioInTheatre
-                  ? 'bg-emerald-950 text-emerald-300 border-emerald-500'
-                  : 'bg-neutral-900 text-neutral-400 border-neutral-800 hover:text-white'
-              }`}
-              title="Mute device speaker so you only hear the big screen theatre sound while viewing subtitles"
-            >
-              {muteMovieAudioInTheatre ? <VolumeX className="w-3 h-3 text-emerald-400" /> : <Volume2 className="w-3 h-3" />}
-              <span>{muteMovieAudioInTheatre ? 'Device Muted' : 'Mute Device Audio'}</span>
-            </button>
+              {/* SECTION 2: AUDIO DESCRIPTION (AD) (Span 2.5 cols on desktop) */}
+              <div className="lg:col-span-2 flex flex-col rounded-2xl bg-neutral-900/90 border border-neutral-800 overflow-hidden shadow-2xl justify-between">
+                <div>
+                  {/* Section 2 Header */}
+                  <div className="px-4 py-3 bg-neutral-900 border-b border-neutral-800 flex items-center gap-2.5">
+                    <div className="w-6 h-6 rounded-full bg-emerald-600 text-white font-black text-xs flex items-center justify-center shrink-0">
+                      2
+                    </div>
+                    <div>
+                      <h3 className="text-xs sm:text-sm font-bold text-white tracking-wide">
+                        Audio Description (AD)
+                      </h3>
+                      <p className="text-[10px] text-neutral-400">Enable AD and select language</p>
+                    </div>
+                  </div>
 
-            {/* Fine Nudge Controls */}
-            <div className="flex items-center gap-1">
-              <button
-                onClick={() => setSyncOffsetMs((prev) => Math.max(-2000, prev - 250))}
-                className="px-1.5 sm:px-2 py-0.5 rounded bg-neutral-900 hover:bg-neutral-800 border border-neutral-700 text-[10px] text-neutral-300 active:scale-95"
-                title="Delay by 250ms"
-              >
-                -250ms
-              </button>
-              <button
-                onClick={() => setSyncOffsetMs(0)}
-                className="px-1.5 py-0.5 rounded bg-neutral-900 border border-neutral-700 text-[10px] text-amber-400 font-bold"
-                title="Reset fine offset to zero"
-              >
-                {syncOffsetMs === 0 ? '0ms' : `${syncOffsetMs > 0 ? '+' : ''}${syncOffsetMs}ms`}
-              </button>
-              <button
-                onClick={() => setSyncOffsetMs((prev) => Math.min(2000, prev + 250))}
-                className="px-1.5 sm:px-2 py-0.5 rounded bg-neutral-900 hover:bg-neutral-800 border border-neutral-700 text-[10px] text-neutral-300 active:scale-95"
-                title="Advance by 250ms"
-              >
-                +250ms
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+                  {/* Section 2 Body */}
+                  <div className="p-4 space-y-4">
+                    {/* AD Toggle Switch */}
+                    <div className="flex items-center justify-between gap-2 p-2.5 rounded-xl bg-neutral-950/80 border border-neutral-800">
+                      <div className="flex items-center gap-2">
+                        <Headphones className="w-4 h-4 text-emerald-400 shrink-0" />
+                        <span className="text-xs font-bold text-white">Audio Description (AD)</span>
+                      </div>
+                      <button
+                        type="button"
+                        disabled={availableAdTracks.length === 0}
+                        onClick={() => setIsAdEnabled(!isAdEnabled)}
+                        className={`relative inline-flex h-5 w-10 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none disabled:opacity-40 ${
+                          isAdEnabled && availableAdTracks.length > 0 ? 'bg-blue-600' : 'bg-neutral-700'
+                        }`}
+                      >
+                        <span
+                          className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow-lg ring-0 transition duration-200 ease-in-out ${
+                            isAdEnabled && availableAdTracks.length > 0 ? 'translate-x-5' : 'translate-x-0'
+                          }`}
+                        />
+                      </button>
+                    </div>
 
-      {/* CENTRAL CINEMA VIEWPORT (Mobile-Optimized & Touch Responsive) */}
-      <div
-        onClick={handleViewportTap}
-        className="relative flex-1 w-full h-full flex items-center justify-center bg-black overflow-hidden cursor-pointer"
-      >
-        {/* NATIVE HTML5 VIDEO ELEMENT */}
-        {/* Notice: NO crossOrigin="anonymous" to prevent CORS decode blocks on mobile browsers */}
-        <video
-          ref={videoRef}
-          src={resolvedVideoUrl}
-          onTimeUpdate={handleTimeUpdate}
-          onEnded={() => setIsPlaying(false)}
-          onWaiting={() => {
-            // Never trigger blocking buffer screen when playing from device storage!
-            if (!isLocalBlobActive) {
-              setIsBuffering(true);
-            }
-          }}
-          onPlaying={() => {
-            setIsPlaying(true);
-            setIsBuffering(false);
-          }}
-          onCanPlay={() => setIsBuffering(false)}
-          onCanPlayThrough={() => setIsBuffering(false)}
-          onLoadedData={() => setIsBuffering(false)}
-          onLoadedMetadata={() => {
-            setIsBuffering(false);
-            if (videoRef.current && videoRef.current.duration) {
-              setDuration(videoRef.current.duration);
-            }
-          }}
-          onError={() => {
-            console.warn('Video source error encountered, cycling to high-compatibility stream fallback');
-            if (isLocalBlobActive) {
-              setLocalBlobUrl(null);
-              setIsLocalBlobActive(false);
-            }
-            setStreamFallbackIndex((prev) => prev + 1);
-            setVideoLoadError('Engaging seamless high-compatibility stream fallback...');
-          }}
-          playsInline
-          webkit-playsinline="true"
-          preload="auto"
-          className="w-full h-full max-h-full max-w-full object-contain pointer-events-none"
-        />
+                    {/* Select AD Language Dropdown */}
+                    {availableAdTracks.length > 0 ? (
+                      <div className="space-y-1.5 relative">
+                        <label className="text-xs font-medium text-neutral-300 block">
+                          Select AD Language
+                        </label>
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setIsAdDropdownOpen(!isAdDropdownOpen);
+                            setIsCcDropdownOpen(false);
+                          }}
+                          className="w-full px-3 py-2 rounded-xl bg-neutral-950 border border-neutral-800 hover:border-neutral-700 text-left text-xs font-medium text-white flex items-center justify-between transition-colors"
+                        >
+                          <span className="truncate">
+                            {currentAdTrack?.languageName || 'English (AD)'}
+                          </span>
+                          <ChevronDown className="w-4 h-4 text-neutral-400 shrink-0" />
+                        </button>
 
-        {/* LIVE BUFFERING SPINNER (Only shown when streaming over network and not from local device) */}
-        {isBuffering && !isLocalBlobActive && (
-          <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/60 pointer-events-auto z-20 p-4">
-            <div className="w-12 h-12 rounded-full border-3 border-amber-500/20 border-t-amber-500 animate-spin mb-3" />
-            <span className="text-xs font-mono font-bold text-amber-300 bg-neutral-950/90 px-3.5 py-1 rounded-full border border-amber-500/40 mb-3 shadow-lg">
-              BUFFERING ONLINE STREAM...
-            </span>
-            {!bufferingAlertDismissed && (
-              <div className="max-w-xs p-3.5 rounded-2xl bg-neutral-900/98 border border-amber-500/50 shadow-2xl backdrop-blur-md text-center space-y-2 animate-fadeIn">
-                <p className="text-[11px] text-neutral-300 font-medium leading-relaxed">
-                  Streaming network is buffering. Download to local device for 100% zero-buffering playback?
-                </p>
-                <div className="flex items-center justify-center gap-2 pt-1">
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      startZeroBufferDownload();
-                    }}
-                    className="px-3 py-1.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-neutral-950 font-bold text-xs flex items-center gap-1.5 shadow-md shadow-amber-500/20 active:scale-95 transition-all"
-                  >
-                    <Download className="w-3.5 h-3.5" />
-                    <span>Download (Zero Buffer)</span>
-                  </button>
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setBufferingAlertDismissed(true);
-                    }}
-                    className="px-2.5 py-1.5 rounded-xl bg-neutral-800 hover:bg-neutral-700 text-neutral-400 hover:text-white text-xs transition-colors"
-                  >
-                    Dismiss
-                  </button>
+                        {/* Dropdown Options */}
+                        {isAdDropdownOpen && (
+                          <div
+                            onClick={(e) => e.stopPropagation()}
+                            className="absolute top-full left-0 right-0 mt-1 z-50 bg-neutral-900 border border-neutral-800 rounded-xl shadow-2xl p-1 space-y-0.5 animate-fadeIn"
+                          >
+                            {availableAdTracks.map((track) => (
+                              <button
+                                key={track.id || track.languageCode}
+                                onClick={() => {
+                                  setSelectedAdLang(track.languageCode);
+                                  setIsAdDropdownOpen(false);
+                                }}
+                                className={`w-full px-3 py-2 rounded-lg text-left text-xs flex items-center justify-between transition-colors ${
+                                  selectedAdLang.toLowerCase() === track.languageCode.toLowerCase()
+                                    ? 'bg-blue-600/20 text-blue-400 font-bold'
+                                    : 'text-neutral-300 hover:bg-neutral-800'
+                                }`}
+                              >
+                                <span>{track.languageName}</span>
+                                {selectedAdLang.toLowerCase() === track.languageCode.toLowerCase() && (
+                                  <Check className="w-3.5 h-3.5 text-blue-400 shrink-0" />
+                                )}
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    ) : (
+                      <p className="text-xs text-neutral-400 italic bg-neutral-950 p-2.5 rounded-xl border border-neutral-800">
+                        Audio Description is unavailable for this film.
+                      </p>
+                    )}
+                  </div>
+                </div>
+
+                {/* AD Info Box at Bottom */}
+                  <div className="p-3 m-3 rounded-xl bg-blue-950/20 border border-blue-900/30 flex items-start gap-2 text-[11px] text-blue-300/90 leading-relaxed">
+                    <Info className="w-4 h-4 text-blue-400 shrink-0 mt-0.5" />
+                    <p>
+                      AD provides additional spoken narration to describe key visual elements during pauses in dialogue.
+                    </p>
+                  </div>
+                </div>
+
+                {/* SECTION 3: CLOSED CAPTIONS (CC) (Span 2.5 cols on desktop) */}
+                <div className="lg:col-span-2 flex flex-col rounded-2xl bg-neutral-900/90 border border-neutral-800 overflow-hidden shadow-2xl justify-between">
+                  <div>
+                    {/* Section 3 Header */}
+                    <div className="px-4 py-3 bg-neutral-900 border-b border-neutral-800 flex items-center gap-2.5">
+                      <div className="w-6 h-6 rounded-full bg-purple-600 text-white font-black text-xs flex items-center justify-center shrink-0">
+                        3
+                      </div>
+                      <div>
+                        <h3 className="text-xs sm:text-sm font-bold text-white tracking-wide">
+                          Closed Captions (CC)
+                        </h3>
+                        <p className="text-[10px] text-neutral-400">Enable CC and select language</p>
+                      </div>
+                    </div>
+
+                    {/* Section 3 Body */}
+                    <div className="p-4 space-y-4">
+                      {/* CC Toggle Switch */}
+                      <div className="flex items-center justify-between gap-2 p-2.5 rounded-xl bg-neutral-950/80 border border-neutral-800">
+                        <div className="flex items-center gap-2">
+                          <Subtitles className="w-4 h-4 text-purple-400 shrink-0" />
+                          <span className="text-xs font-bold text-white">Closed Captions (CC)</span>
+                        </div>
+                        <button
+                          type="button"
+                          disabled={availableCcTracks.length === 0}
+                          onClick={() => setIsCcEnabled(!isCcEnabled)}
+                          className={`relative inline-flex h-5 w-10 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none disabled:opacity-40 ${
+                            isCcEnabled && availableCcTracks.length > 0 ? 'bg-blue-600' : 'bg-neutral-700'
+                          }`}
+                        >
+                          <span
+                            className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow-lg ring-0 transition duration-200 ease-in-out ${
+                              isCcEnabled && availableCcTracks.length > 0 ? 'translate-x-5' : 'translate-x-0'
+                            }`}
+                          />
+                        </button>
+                      </div>
+
+                      {/* Select CC Language Dropdown */}
+                      {availableCcTracks.length > 0 ? (
+                        <div className="space-y-1.5 relative">
+                          <label className="text-xs font-medium text-neutral-300 block">
+                            Select CC Language
+                          </label>
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setIsCcDropdownOpen(!isCcDropdownOpen);
+                              setIsAdDropdownOpen(false);
+                            }}
+                            className="w-full px-3 py-2 rounded-xl bg-neutral-950 border border-neutral-800 hover:border-neutral-700 text-left text-xs font-medium text-white flex items-center justify-between transition-colors"
+                          >
+                            <span className="truncate">
+                              {currentCcTrack?.languageName || 'English'}
+                            </span>
+                            <ChevronDown className="w-4 h-4 text-neutral-400 shrink-0" />
+                          </button>
+
+                          {/* Dropdown Options */}
+                          {isCcDropdownOpen && (
+                            <div
+                              onClick={(e) => e.stopPropagation()}
+                              className="absolute top-full left-0 right-0 mt-1 z-50 bg-neutral-900 border border-neutral-800 rounded-xl shadow-2xl p-1 space-y-0.5 animate-fadeIn max-h-48 overflow-y-auto"
+                            >
+                              {availableCcTracks.map((track) => (
+                                <button
+                                  key={track.id || track.languageCode}
+                                  onClick={() => {
+                                    setSelectedCcLang(track.languageCode);
+                                    setIsCcDropdownOpen(false);
+                                  }}
+                                  className={`w-full px-3 py-2 rounded-lg text-left text-xs flex items-center justify-between transition-colors ${
+                                    selectedCcLang.toLowerCase() === track.languageCode.toLowerCase()
+                                      ? 'bg-blue-600/20 text-blue-400 font-bold'
+                                      : 'text-neutral-300 hover:bg-neutral-800'
+                                  }`}
+                                >
+                                  <span>{track.languageName}</span>
+                                  {selectedCcLang.toLowerCase() === track.languageCode.toLowerCase() && (
+                                    <Check className="w-3.5 h-3.5 text-blue-400 shrink-0" />
+                                  )}
+                                </button>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      ) : (
+                        <p className="text-xs text-neutral-400 italic bg-neutral-950 p-2.5 rounded-xl border border-neutral-800">
+                          Closed Captions are unavailable for this film.
+                        </p>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* CC Info Box at Bottom */}
+                  <div className="p-3 m-3 rounded-xl bg-purple-950/20 border border-purple-900/30 flex items-start gap-2 text-[11px] text-purple-300/90 leading-relaxed">
+                    <Info className="w-4 h-4 text-purple-400 shrink-0 mt-0.5" />
+                    <p>
+                      CC controls select the caption language. Synchronized text appears below in the dedicated captions display area.
+                    </p>
+                  </div>
                 </div>
               </div>
-            )}
-          </div>
-        )}
 
-        {/* PRE-PLAY ZERO-BUFFER DOWNLOAD PROMPT */}
-        {/* Requirement: Video should not buffer during viewing, give download option to local device before playing, then play from local device without buffering */}
-        {showZeroBufferPrompt && !hasStartedPlayback && !isLocalBlobActive && !isDownloading && (
-          <div
-            onClick={(e) => e.stopPropagation()}
-            className="absolute inset-0 z-30 flex items-center justify-center p-4 bg-black/85 backdrop-blur-md animate-fadeIn"
-          >
-            <div className="w-full max-w-md p-5 sm:p-6 rounded-3xl bg-neutral-900/98 border border-amber-500/40 shadow-2xl text-center space-y-4">
-              <div className="w-14 h-14 mx-auto rounded-2xl bg-amber-500/20 border border-amber-500/40 flex items-center justify-center text-amber-400 shadow-xl shadow-amber-500/10">
-                <Zap className="w-7 h-7 fill-amber-400/20" />
+              {/* DEDICATED SYNCHRONIZED CLOSED CAPTIONS (CC) SECTION BELOW VIDEO */}
+              <div className="rounded-2xl bg-neutral-900/90 border border-neutral-800 overflow-hidden shadow-2xl animate-fadeIn">
+                {/* Pink/Red Banner Header matching mockup */}
+                <div className="px-5 py-3.5 bg-rose-500/10 border-b border-rose-500/20 flex items-center gap-3">
+                  <div className="w-8 h-8 rounded-lg bg-rose-600 text-white flex items-center justify-center shrink-0 shadow-md shadow-rose-600/20">
+                    <Subtitles className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-bold text-rose-300 tracking-wide">
+                      Synchronized Closed Captions (CC)
+                    </h3>
+                    <p className="text-xs text-rose-200/70">
+                      Caption text displayed below the video and synchronized with playback
+                    </p>
+                  </div>
+                </div>
+
+                {/* Synchronized Caption Text Display Box */}
+                <div className="p-6 sm:p-8 flex items-center justify-center min-h-[120px] sm:min-h-[140px] bg-neutral-950/90 border-t border-neutral-800 text-center">
+                  {!isCcEnabled ? (
+                    <p className="text-xs sm:text-sm font-mono text-neutral-500 italic">
+                      Closed Captions are disabled. Toggle CC ON in section 3 above to view synchronized subtitles.
+                    </p>
+                  ) : availableCcTracks.length === 0 ? (
+                    <p className="text-xs sm:text-sm font-mono text-neutral-500 italic">
+                      Closed Captions are unavailable for this film.
+                    </p>
+                  ) : activeCcCue ? (
+                    <div className="max-w-4xl space-y-1 animate-fadeIn">
+                      {/* Speaker label if available */}
+                      {activeCcCue.speaker && (
+                        <span className="inline-block px-2 py-0.5 mb-1 rounded text-xs font-mono font-bold uppercase tracking-wider bg-purple-950/80 text-purple-300 border border-purple-800/60">
+                          [{activeCcCue.speaker}]
+                        </span>
+                      )}
+                      {/* Sound Effect if available */}
+                      {activeCcCue.soundEffect && (
+                        <p className="text-xs sm:text-sm font-mono italic text-amber-300/90 mb-1">
+                          [{activeCcCue.soundEffect}]
+                        </p>
+                      )}
+                      {/* Synchronized Dialogue Text */}
+                      <p className="text-lg sm:text-2xl md:text-3xl font-semibold text-white tracking-wide leading-relaxed font-sans break-words">
+                        {activeCcCue.text}
+                      </p>
+                    </div>
+                  ) : (
+                    <p className="text-xs sm:text-sm font-mono text-neutral-500 italic">
+                      — No dialogue at this timestamp —
+                    </p>
+                  )}
+                </div>
               </div>
-
-              <div>
-                <span className="px-2.5 py-0.5 rounded text-[10px] font-mono font-black bg-amber-500 text-neutral-950 uppercase tracking-wider">
-                  HIGH PERFORMANCE VIEWING
-                </span>
-                <h3 className="text-lg sm:text-xl font-black text-white uppercase tracking-wide mt-2">
-                  Zero-Buffer Playback Option
-                </h3>
-                <p className="text-xs text-neutral-300 mt-1.5 leading-relaxed">
-                  Download this film into your device sandbox once to enjoy <strong>100% zero-buffering</strong>, instant seeking, and uninterrupted viewing.
-                </p>
-              </div>
-
-              <div className="flex flex-col gap-2.5 pt-1">
-                {/* Option 1: Download to local device for zero buffering */}
-                <button
-                  onClick={startZeroBufferDownload}
-                  className="w-full py-3.5 px-4 rounded-2xl bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-neutral-950 font-black text-xs sm:text-sm uppercase tracking-wider flex items-center justify-center gap-2 shadow-xl shadow-amber-500/25 active:scale-98 transition-all"
-                >
-                  <Download className="w-4 h-4 stroke-[2.5]" />
-                  <span>DOWNLOAD TO DEVICE (ZERO BUFFER)</span>
-                </button>
-
-                {/* Option 2: Play online stream immediately */}
-                <button
-                  onClick={() => {
-                    setShowZeroBufferPrompt(false);
-                    togglePlay();
-                  }}
-                  className="w-full py-2.5 px-4 rounded-xl bg-neutral-800/80 hover:bg-neutral-800 border border-neutral-700 text-neutral-300 hover:text-white font-bold text-xs uppercase flex items-center justify-center gap-2 transition-all"
-                >
-                  <Play className="w-3.5 h-3.5 fill-current" />
-                  <span>Stream Online Immediately</span>
-                </button>
-              </div>
-
-              <div className="flex items-center justify-center gap-1.5 text-[10px] text-neutral-400 font-mono pt-1">
-                <HardDrive className="w-3 h-3 text-emerald-400" />
-                <span>Encrypted In-App Sandbox • Won't export to device photo gallery</span>
-              </div>
-            </div>
           </div>
-        )}
-
-        {/* TAP TO PLAY / RESUME CENTRAL OVERLAY */}
-        {!isPlaying && !isTouchLocked && !isBuffering && (!showZeroBufferPrompt || isLocalBlobActive) && (
-          <div
-            onClick={(e) => {
-              e.stopPropagation();
-              togglePlay();
-            }}
-            className="absolute inset-0 flex flex-col items-center justify-center bg-black/45 cursor-pointer z-20 backdrop-blur-[1px] animate-fadeIn"
-          >
-            {isLocalBlobActive && (
-              <div className="flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 text-xs font-mono font-bold mb-3 shadow-lg shadow-emerald-500/10 animate-fadeIn">
-                <Zap className="w-3.5 h-3.5 text-emerald-400 fill-emerald-400" />
-                <span>ZERO-BUFFER LOCAL PLAYBACK ACTIVE</span>
-              </div>
-            )}
-
-            <div className="w-20 h-20 sm:w-24 sm:h-24 rounded-full bg-amber-500 hover:bg-amber-400 text-neutral-950 flex items-center justify-center shadow-2xl shadow-amber-500/40 transition-transform hover:scale-105 active:scale-95">
-              <Play className="w-10 h-10 sm:w-12 sm:h-12 fill-current ml-1.5" />
-            </div>
-            <span className="mt-4 text-xs sm:text-sm font-black font-mono tracking-wider text-white uppercase px-4 py-1.5 rounded-full bg-neutral-900/95 border border-neutral-700 shadow-xl">
-              {hasStartedPlayback ? 'TAP TO RESUME PLAYBACK' : 'TAP TO START SCREENING'}
-            </span>
-            <span className="mt-2 text-[10px] text-neutral-400 font-mono">
-              Double-tap left/right to skip 10s • Single tap for controls
-            </span>
-          </div>
-        )}
-
-        {/* MOBILE UNMUTE AUDIO PROMPT (When mobile browser plays muted) */}
-        {showUnmutePrompt && (
-          <div
-            onClick={(e) => {
-              e.stopPropagation();
-              handleUnmuteAudio();
-            }}
-            className="absolute top-20 z-30 px-4 py-2 rounded-2xl bg-amber-500 text-neutral-950 font-black text-xs font-mono flex items-center gap-2 shadow-2xl animate-bounce cursor-pointer"
-          >
-            <VolumeX className="w-4 h-4 text-neutral-950" />
-            <span>TAP TO UNMUTE AUDIO 🔊</span>
-          </div>
-        )}
-
-        {/* DOUBLE TAP SEEK FEEDBACK RIPPLE */}
-        {seekFeedback && (
-          <div
-            className={`absolute top-1/2 -translate-y-1/2 ${
-              seekFeedback.side === 'left' ? 'left-12 sm:left-24' : 'right-12 sm:right-24'
-            } z-30 pointer-events-none flex flex-col items-center justify-center animate-ping`}
-          >
-            <div className="w-16 h-16 rounded-full bg-amber-500/80 text-neutral-950 flex items-center justify-center font-black font-mono text-sm shadow-xl">
-              {seekFeedback.text}
-            </div>
-          </div>
-        )}
-
-        {/* STREAM ERROR / RECOVERY NOTIFICATION */}
-        {videoLoadError && (
-          <div className="absolute top-16 inset-x-4 max-w-md mx-auto z-30 p-3 rounded-2xl bg-neutral-950/95 border border-amber-500/60 shadow-2xl flex items-center justify-between gap-3 text-xs font-mono text-amber-300">
-            <div className="flex items-center gap-2">
-              <AlertCircle className="w-4 h-4 text-amber-400 shrink-0" />
-              <span className="line-clamp-2">{videoLoadError}</span>
-            </div>
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                setVideoSourceType('standard');
-                setStreamFallbackIndex((prev) => prev + 1);
-                setVideoLoadError(null);
-                if (videoRef.current) videoRef.current.load();
-              }}
-              className="px-2.5 py-1 rounded-xl bg-amber-500 text-neutral-950 font-bold shrink-0 text-[11px]"
-            >
-              Use Backup MP4
-            </button>
-          </div>
-        )}
-
-        {/* LIVE CLOSED CAPTION CINEMA OVERLAY (Requirement: CC ALWAYS SHOWING & VISIBLE ON MOBILE) */}
-        {selectedCcLang !== 'Off' && activeCcCue && (
-          <div
-            className={`absolute inset-x-3 sm:inset-x-6 pointer-events-none z-30 flex justify-center transition-all duration-300 ${
-              ccPosition === 'center'
-                ? 'top-1/2 -translate-y-1/2'
-                : ccPosition === 'hud'
-                ? 'top-20'
-                : showControls
-                ? 'bottom-36 sm:bottom-28'
-                : 'bottom-8 sm:bottom-12'
-            }`}
-          >
-            <div
-              className={`px-4 sm:px-6 py-2.5 sm:py-3 rounded-2xl max-w-3xl text-center leading-relaxed transition-all ${getCcThemeClass()}`}
-            >
-              {/* Speaker Label */}
-              {ccShowSpeakers && activeCcCue.speaker && (
-                <span className="text-[11px] sm:text-xs font-mono font-bold mr-2 uppercase tracking-wider opacity-90 px-1.5 py-0.5 rounded bg-black/50 border border-white/20">
-                  [{activeCcCue.speaker}]
-                </span>
-              )}
-
-              {/* Sound Effect Descriptor */}
-              {ccShowSoundEffects && activeCcCue.soundEffect && (
-                <span className="text-[11px] sm:text-xs font-mono italic mr-2 opacity-85 text-amber-200">
-                  [{activeCcCue.soundEffect.toUpperCase()}]
-                </span>
-              )}
-
-              {/* Subtitle Dialogue Text */}
-              <p className={`font-sans tracking-wide leading-relaxed inline ${getCcFontSizeClass()}`}>
-                {activeCcCue.text}
-              </p>
-            </div>
-          </div>
-        )}
-
-        {/* LIVE AUDIO DESCRIPTION HUD */}
-        {selectedAdLang !== 'Off' && activeAdCue && (
-          <div className="absolute top-20 right-4 z-30 max-w-xs sm:max-w-sm p-3 rounded-2xl bg-neutral-950/95 border border-amber-500/60 backdrop-blur-md text-xs font-mono text-amber-300 shadow-2xl animate-fadeIn pointer-events-none">
-            <div className="flex items-center justify-between gap-2 text-amber-400 font-bold mb-1 pb-1 border-b border-amber-900/40">
+        ) : (
+          /* ------------------------------------------------------------ */
+          /* MOBILE APP PLAYBACK INTERFACE (Pixel-accurate matching mockup) */
+          /* ------------------------------------------------------------ */
+          <div className="max-w-md mx-auto rounded-3xl bg-neutral-950 border-2 border-neutral-800 overflow-hidden shadow-2xl animate-fadeIn">
+            {/* Mobile Smartphone Status Bar */}
+            <div className="px-6 pt-3 pb-1 flex items-center justify-between text-xs font-mono text-neutral-400">
+              <span className="font-bold text-white">9:41</span>
               <div className="flex items-center gap-1.5">
-                <Headphones className="w-3.5 h-3.5 text-amber-400" />
-                <span>AUDIO DESCRIPTION ({selectedAdLang.toUpperCase()})</span>
-              </div>
-              {isDuckingActive && (
-                <span className="text-[9px] px-1.5 py-0.5 rounded bg-amber-500 text-neutral-950 font-black animate-pulse">
-                  DUCKING
-                </span>
-              )}
-            </div>
-            <p className="text-[11px] text-neutral-200 leading-snug">
-              {activeAdCue.text}
-            </p>
-          </div>
-        )}
-      </div>
-
-      {/* QUICK SETTINGS & CONTROLS POPUP DRAWER (Touch & Mobile Friendly) */}
-      {activeSettingsTab && (
-        <div
-          onClick={(e) => e.stopPropagation()}
-          className="absolute inset-x-2 sm:inset-x-4 bottom-24 z-40 max-w-xl mx-auto p-4 bg-neutral-900/98 border border-neutral-800 rounded-3xl shadow-2xl backdrop-blur-md animate-fadeIn text-neutral-100"
-        >
-          <div className="flex items-center justify-between pb-3 border-b border-neutral-800 mb-3">
-            <span className="text-xs font-mono font-bold uppercase text-amber-400 flex items-center gap-1.5">
-              <Settings className="w-4 h-4" />
-              <span>
-                {activeSettingsTab === 'cc'
-                  ? 'Closed Captions (CC) Settings'
-                  : activeSettingsTab === 'ad'
-                  ? 'Audio Description (AD) Settings'
-                  : activeSettingsTab === 'source'
-                  ? 'Video Stream Selector'
-                  : 'Playback Speed'}
-              </span>
-            </span>
-            <button
-              onClick={() => setActiveSettingsTab(null)}
-              className="text-neutral-400 hover:text-white p-1 rounded-lg"
-            >
-              <X className="w-4 h-4" />
-            </button>
-          </div>
-
-          {/* CC SETTINGS */}
-          {activeSettingsTab === 'cc' && (
-            <div className="space-y-3.5 text-xs">
-              <div>
-                <label className="text-[11px] font-mono text-neutral-400 block mb-1.5">
-                  CAPTION LANGUAGE
-                </label>
-                <div className="flex flex-wrap gap-1.5">
-                  <button
-                    onClick={() => setSelectedCcLang('Off')}
-                    className={`px-3 py-1.5 rounded-xl font-bold transition-colors ${
-                      selectedCcLang === 'Off'
-                        ? 'bg-amber-500 text-neutral-950'
-                        : 'bg-neutral-950 text-neutral-300 border border-neutral-800'
-                    }`}
-                  >
-                    Off
-                  </button>
-                  {availableCcTracks.map((t) => (
-                    <button
-                      key={t.id || t.languageCode}
-                      onClick={() => setSelectedCcLang(t.languageCode)}
-                      className={`px-3 py-1.5 rounded-xl font-bold transition-colors ${
-                        selectedCcLang.toLowerCase() === t.languageCode.toLowerCase()
-                          ? 'bg-amber-500 text-neutral-950'
-                          : 'bg-neutral-950 text-neutral-300 border border-neutral-800'
-                      }`}
-                    >
-                      {t.languageName}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              <div>
-                <label className="text-[11px] font-mono text-neutral-400 block mb-1.5">FONT SIZE</label>
-                <div className="grid grid-cols-4 gap-1.5">
-                  {(['sm', 'md', 'lg', 'xl'] as CCFontSize[]).map((size) => (
-                    <button
-                      key={size}
-                      onClick={() => setCcFontSize(size)}
-                      className={`py-1.5 rounded-xl uppercase font-bold transition-colors ${
-                        ccFontSize === size
-                          ? 'bg-amber-500 text-neutral-950'
-                          : 'bg-neutral-950 text-neutral-400 border border-neutral-800'
-                      }`}
-                    >
-                      {size}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              <div>
-                <label className="text-[11px] font-mono text-neutral-400 block mb-1.5">CONTRAST THEME</label>
-                <div className="grid grid-cols-2 gap-2">
-                  <button
-                    onClick={() => setCcTheme('yellow-black')}
-                    className={`p-2 rounded-xl text-left border ${
-                      ccTheme === 'yellow-black'
-                        ? 'border-amber-400 bg-black'
-                        : 'border-neutral-800 bg-neutral-950'
-                    }`}
-                  >
-                    <span className="text-amber-400 font-bold block">Yellow on Black</span>
-                    <span className="text-[10px] text-neutral-400">High Visibility (Standard)</span>
-                  </button>
-                  <button
-                    onClick={() => setCcTheme('white-black')}
-                    className={`p-2 rounded-xl text-left border ${
-                      ccTheme === 'white-black'
-                        ? 'border-amber-400 bg-black'
-                        : 'border-neutral-800 bg-neutral-950'
-                    }`}
-                  >
-                    <span className="text-white font-bold block">White on Black</span>
-                    <span className="text-[10px] text-neutral-400">Classic Cinema</span>
-                  </button>
-                </div>
-              </div>
-
-              <div>
-                <label className="text-[11px] font-mono text-neutral-400 block mb-1.5">SCREEN POSITION</label>
-                <div className="grid grid-cols-3 gap-1.5">
-                  {(['bottom', 'center', 'hud'] as CCPosition[]).map((pos) => (
-                    <button
-                      key={pos}
-                      onClick={() => setCcPosition(pos)}
-                      className={`py-1.5 rounded-xl uppercase font-bold text-center ${
-                        ccPosition === pos
-                          ? 'bg-amber-500 text-neutral-950'
-                          : 'bg-neutral-950 text-neutral-400 border border-neutral-800'
-                      }`}
-                    >
-                      {pos}
-                    </button>
-                  ))}
-                </div>
+                <Wifi className="w-3.5 h-3.5 text-neutral-300" />
+                <Battery className="w-4 h-4 text-neutral-300" />
               </div>
             </div>
-          )}
 
-          {/* AD SETTINGS */}
-          {activeSettingsTab === 'ad' && (
-            <div className="space-y-3.5 text-xs">
-              <div>
-                <label className="text-[11px] font-mono text-neutral-400 block mb-1.5">
-                  AUDIO DESCRIPTION TRACK
-                </label>
-                <div className="flex flex-wrap gap-1.5">
-                  <button
-                    onClick={() => setSelectedAdLang('Off')}
-                    className={`px-3 py-1.5 rounded-xl font-bold ${
-                      selectedAdLang === 'Off'
-                        ? 'bg-amber-500 text-neutral-950'
-                        : 'bg-neutral-950 text-neutral-300 border border-neutral-800'
-                    }`}
-                  >
-                    Off
-                  </button>
-                  {availableAdTracks.map((t) => (
-                    <button
-                      key={t.id || t.languageCode}
-                      onClick={() => setSelectedAdLang(t.languageCode)}
-                      className={`px-3 py-1.5 rounded-xl font-bold ${
-                        selectedAdLang.toLowerCase() === t.languageCode.toLowerCase()
-                          ? 'bg-emerald-500 text-neutral-950'
-                          : 'bg-neutral-950 text-neutral-300 border border-neutral-800'
-                      }`}
-                    >
-                      {t.languageName}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              <div>
-                <div className="flex justify-between text-[11px] font-mono text-neutral-400 mb-1.5">
-                  <span>AD NARRATION VOLUME</span>
-                  <span>{Math.round(adVolume * 100)}%</span>
-                </div>
-                <input
-                  type="range"
-                  min="0.2"
-                  max="1.5"
-                  step="0.05"
-                  value={adVolume}
-                  onChange={(e) => setAdVolume(parseFloat(e.target.value))}
-                  className="w-full h-2 bg-neutral-800 rounded-lg appearance-none accent-amber-500"
-                />
-              </div>
-
-              <label className="flex items-center justify-between p-2.5 rounded-xl bg-neutral-950 border border-neutral-800 cursor-pointer">
-                <span>Audio Ducking (Softens movie sound during AD narration)</span>
-                <input
-                  type="checkbox"
-                  checked={adDuckingEnabled}
-                  onChange={(e) => setAdDuckingEnabled(e.target.checked)}
-                  className="w-4 h-4 accent-amber-500 rounded"
-                />
-              </label>
-            </div>
-          )}
-
-          {/* STREAM SOURCE SELECTOR */}
-          {activeSettingsTab === 'source' && (
-            <div className="space-y-2 text-xs">
-              <p className="text-[11px] text-neutral-400 mb-2">
-                If video does not play or is stuttering on mobile, switch to High-Compatibility Mobile MP4:
-              </p>
-              {[
-                {
-                  id: 'auto',
-                  title: 'Auto-Detect Stream',
-                  desc: 'Optimal stream selected with automatic failover',
-                },
-                {
-                  id: 'standard',
-                  title: 'High-Compatibility Mobile MP4',
-                  desc: 'Plays on 100% of mobile browsers, iPhones & Android devices',
-                },
-                {
-                  id: 'cloud',
-                  title: 'Google Drive Stream',
-                  desc: 'Direct from Google Drive cloud storage vault',
-                },
-                {
-                  id: 'original',
-                  title: 'Theatrical Master Asset',
-                  desc: film.videoFileName || 'Direct original uploaded file',
-                },
-              ].map((s) => (
+            {/* Mobile App Header (Back, Title, Heart, Three dots) */}
+            <div className="px-4 py-2.5 flex items-center justify-between gap-3 border-b border-neutral-900">
+              <button
+                onClick={onClose}
+                className="p-1 rounded-lg text-neutral-400 hover:text-white"
+                title="Back"
+              >
+                <ArrowLeft className="w-5 h-5" />
+              </button>
+              <h2 className="text-sm font-bold text-white truncate text-center flex-1">
+                {film.title}
+              </h2>
+              <div className="flex items-center gap-1">
                 <button
-                  key={s.id}
-                  onClick={() => {
-                    setVideoSourceType(s.id as any);
-                    setVideoLoadError(null);
-                    setActiveSettingsTab(null);
+                  onClick={() => setIsFavorite(!isFavorite)}
+                  className="p-1 rounded-lg text-neutral-400 hover:text-rose-400"
+                >
+                  <Heart className={`w-5 h-5 ${isFavorite ? 'text-rose-500 fill-rose-500' : ''}`} />
+                </button>
+                <button
+                  onClick={() => setShowSettingsDrawer(!showSettingsDrawer)}
+                  className="p-1 rounded-lg text-neutral-400 hover:text-white"
+                >
+                  <MoreVertical className="w-5 h-5" />
+                </button>
+              </div>
+            </div>
+
+            {/* SECTION 1: MAIN VIDEO PLAYER (Top Section 1 of 3) */}
+            <div className="rounded-2xl bg-neutral-900 border border-neutral-800 overflow-hidden shadow-xl mx-3 mt-3">
+              {/* Section 1 Header */}
+              <div className="px-3.5 py-2.5 bg-neutral-900 border-b border-neutral-800 flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <div className="w-5 h-5 rounded-full bg-blue-600 text-white font-black text-[10px] flex items-center justify-center shrink-0">
+                    1
+                  </div>
+                  <div>
+                    <h3 className="text-xs font-bold text-white tracking-wide">Video Player</h3>
+                    <p className="text-[9px] text-neutral-400">Main film playback area</p>
+                  </div>
+                </div>
+                <span className="text-[10px] font-mono text-neutral-400">
+                  {formatTime(currentTime)} / {formatTime(duration)}
+                </span>
+              </div>
+
+              {/* Video Player Display Container */}
+              <div className="relative aspect-video bg-black flex items-center justify-center overflow-hidden">
+                <video
+                  ref={videoRef}
+                  src={resolvedVideoUrl}
+                  onTimeUpdate={() => {
+                    if (videoRef.current) {
+                      setCurrentTime(videoRef.current.currentTime);
+                      const dur = videoRef.current.duration;
+                      if (dur && !isNaN(dur) && dur > 0) setDuration(dur);
+                    }
                   }}
-                  className={`w-full p-2.5 rounded-xl text-left border flex items-center justify-between transition-colors ${
-                    videoSourceType === s.id
-                      ? 'bg-amber-500/15 border-amber-500 text-amber-300 font-bold'
-                      : 'bg-neutral-950 border-neutral-800 text-neutral-300 hover:bg-neutral-900'
+                  onWaiting={() => {
+                    if (!isLocalBlobActive) setIsBuffering(true);
+                  }}
+                  onPlaying={() => {
+                    setIsPlaying(true);
+                    setIsBuffering(false);
+                  }}
+                  onCanPlay={() => setIsBuffering(false)}
+                  onCanPlayThrough={() => setIsBuffering(false)}
+                  onLoadedMetadata={() => {
+                    setIsBuffering(false);
+                    if (videoRef.current?.duration) setDuration(videoRef.current.duration);
+                  }}
+                  onEnded={() => {
+                    setIsPlaying(false);
+                    speechNarrator.stop();
+                    speechNarrator.resetLastCue();
+                  }}
+                  onSeeked={() => {
+                    speechNarrator.stop();
+                    speechNarrator.resetLastCue();
+                  }}
+                  onError={() => {
+                    if (isLocalBlobActive) {
+                      setLocalBlobUrl(null);
+                      setIsLocalBlobActive(false);
+                    }
+                    setStreamFallbackIndex((prev) => prev + 1);
+                    setVideoLoadError('Playback error encountered. Using backup stream.');
+                  }}
+                  playsInline
+                  preload="auto"
+                  className="w-full h-full object-contain"
+                />
+
+                {/* Buffering Spinner */}
+                {isBuffering && !isLocalBlobActive && (
+                  <div className="absolute inset-0 bg-black/60 flex flex-col items-center justify-center z-20">
+                    <Loader2 className="w-8 h-8 text-amber-500 animate-spin mb-1.5" />
+                    <span className="text-[10px] font-mono text-amber-300">Buffering...</span>
+                  </div>
+                )}
+
+                {/* Playback Error Recovery Banner */}
+                {videoLoadError && (
+                  <div className="absolute top-2 inset-x-2 z-30 p-2 rounded-xl bg-neutral-950/95 border border-amber-500/60 flex items-center justify-between gap-1.5 text-[10px] font-mono text-amber-300 shadow-xl">
+                    <span className="line-clamp-1">{videoLoadError}</span>
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setVideoLoadError(null);
+                        setStreamFallbackIndex((prev) => prev + 1);
+                        if (videoRef.current) videoRef.current.load();
+                      }}
+                      className="px-2 py-0.5 rounded bg-amber-500 text-neutral-950 font-bold shrink-0 text-[10px]"
+                    >
+                      Retry
+                    </button>
+                  </div>
+                )}
+
+                {/* Statutory Watermark */}
+                <div className="absolute top-2 right-2 z-20 pointer-events-none opacity-40 font-mono text-[8px] text-amber-300">
+                  {watermark}
+                </div>
+
+                {/* Controls Overlay */}
+                <div
+                  className={`absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/95 to-transparent p-2.5 pt-5 z-30 flex flex-col gap-1.5 transition-opacity ${
+                    showControls ? 'opacity-100' : 'opacity-0 pointer-events-none'
                   }`}
                 >
-                  <div>
-                    <div>{s.title}</div>
-                    <div className="text-[10px] text-neutral-500">{s.desc}</div>
+                  <input
+                    type="range"
+                    min={0}
+                    max={duration || 100}
+                    step={0.1}
+                    value={currentTime}
+                    onChange={(e) => handleSeek(parseFloat(e.target.value))}
+                    className="w-full h-1 bg-neutral-700 rounded appearance-none cursor-pointer accent-amber-500"
+                  />
+                  <div className="flex items-center justify-between text-white text-[11px]">
+                    <div className="flex items-center gap-2">
+                      <button onClick={togglePlay} className="p-1">
+                        {isPlaying ? <Pause className="w-3.5 h-3.5 fill-current" /> : <Play className="w-3.5 h-3.5 fill-current" />}
+                      </button>
+                      <span className="font-mono text-[10px] text-neutral-300">
+                        {formatTime(currentTime)} / {formatTime(duration)}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <button
+                        onClick={() => setIsMuted(!isMuted)}
+                        className="p-1 text-neutral-300"
+                      >
+                        {isMuted ? <VolumeX className="w-3.5 h-3.5 text-rose-400" /> : <Volume2 className="w-3.5 h-3.5" />}
+                      </button>
+                      <button
+                        onClick={() => setIsCcEnabled(!isCcEnabled)}
+                        className={`px-1.5 py-0.5 rounded text-[9px] font-mono font-bold border ${
+                          isCcEnabled ? 'bg-purple-600 text-white border-purple-500' : 'bg-neutral-800 text-neutral-400'
+                        }`}
+                      >
+                        CC
+                      </button>
+                      <button onClick={toggleFullscreen} className="p-1 text-neutral-300">
+                        <Maximize className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
                   </div>
-                  {videoSourceType === s.id && <CheckCircle2 className="w-4 h-4 text-amber-400 shrink-0" />}
-                </button>
-              ))}
-            </div>
-          )}
-
-          {/* PLAYBACK SPEED */}
-          {activeSettingsTab === 'speed' && (
-            <div className="space-y-2 text-xs">
-              <div className="grid grid-cols-5 gap-2">
-                {[0.75, 1.0, 1.25, 1.5, 2.0].map((rate) => (
-                  <button
-                    key={rate}
-                    onClick={() => {
-                      setPlaybackSpeed(rate);
-                      setActiveSettingsTab(null);
-                    }}
-                    className={`py-2 rounded-xl font-bold font-mono text-center ${
-                      playbackSpeed === rate
-                        ? 'bg-amber-500 text-neutral-950'
-                        : 'bg-neutral-950 text-neutral-400 border border-neutral-800 hover:text-white'
-                    }`}
-                  >
-                    {rate}x
-                  </button>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {/* LOCAL STORAGE & ZERO-BUFFER ENGINE */}
-          {activeSettingsTab === 'storage' && (
-            <div className="space-y-3.5 text-xs">
-              <div className="p-3 rounded-2xl bg-neutral-950 border border-neutral-800 space-y-2">
-                <div className="flex items-center justify-between">
-                  <span className="font-mono text-neutral-400 text-[11px]">STORAGE STATUS</span>
-                  <span
-                    className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold ${
-                      isLocalBlobActive
-                        ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
-                        : 'bg-neutral-800 text-neutral-400'
-                    }`}
-                  >
-                    {isLocalBlobActive ? 'SAVED ON LOCAL DEVICE' : 'ONLINE STREAMING ONLY'}
-                  </span>
                 </div>
-                <p className="text-[11px] text-neutral-300 leading-relaxed">
-                  {isLocalBlobActive
-                    ? 'This film is cached inside the application sandbox (IndexedDB). Playback runs 100% locally with zero buffering, instant seek, and no network dependencies.'
-                    : 'Download to your device before viewing to completely eliminate network buffering and stuttering.'}
-                </p>
               </div>
+            </div>
 
-              <div className="flex flex-col gap-2 pt-1">
-                {!isLocalBlobActive ? (
-                  <button
-                    onClick={() => {
-                      setActiveSettingsTab(null);
-                      startZeroBufferDownload();
-                    }}
-                    className="w-full py-2.5 px-4 rounded-xl bg-amber-500 hover:bg-amber-400 text-neutral-950 font-bold text-xs uppercase flex items-center justify-center gap-2 shadow-md shadow-amber-500/20"
-                  >
-                    <Download className="w-4 h-4" />
-                    <span>Download to Local Device (Zero Buffer)</span>
-                  </button>
-                ) : (
-                  <div className="flex gap-2">
-                    <button
-                      onClick={() => {
-                        setActiveSettingsTab(null);
-                        startZeroBufferDownload();
-                      }}
-                      className="flex-1 py-2 px-3 rounded-xl bg-neutral-800 hover:bg-neutral-700 text-neutral-200 text-xs font-bold flex items-center justify-center gap-1.5"
-                    >
-                      <RefreshCw className="w-3.5 h-3.5" />
-                      <span>Re-Download / Refresh</span>
-                    </button>
-                    <button
-                      onClick={() => {
-                        handleDeleteLocalCopy();
-                        setActiveSettingsTab(null);
-                      }}
-                      className="py-2 px-3 rounded-xl bg-rose-950/60 hover:bg-rose-900 border border-rose-800/60 text-rose-300 text-xs font-bold flex items-center justify-center gap-1.5"
-                    >
-                      <Trash2 className="w-3.5 h-3.5" />
-                      <span>Clear Copy</span>
-                    </button>
+            {/* Mobile Accessibility Controls (Sections 2 & 3) */}
+            <div className="p-3 space-y-3">
+              {/* SECTION 2: AUDIO DESCRIPTION (AD) (Top Section 2 of 3) */}
+              <div className="p-3.5 rounded-2xl bg-neutral-900 border border-neutral-800 space-y-3">
+                <div className="flex items-center justify-between pb-2 border-b border-neutral-800">
+                  <div className="flex items-center gap-2">
+                    <div className="w-5 h-5 rounded-full bg-emerald-600 text-white font-black text-[10px] flex items-center justify-center shrink-0">
+                      2
+                    </div>
+                    <div>
+                      <h4 className="text-xs font-bold text-white">Audio Description (AD)</h4>
+                      <p className="text-[9px] text-neutral-400">Enable AD and select language</p>
+                    </div>
                   </div>
+                  <button
+                    type="button"
+                    disabled={availableAdTracks.length === 0}
+                    onClick={() => setIsAdEnabled(!isAdEnabled)}
+                    className={`relative inline-flex h-5 w-10 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out disabled:opacity-40 ${
+                      isAdEnabled && availableAdTracks.length > 0 ? 'bg-blue-600' : 'bg-neutral-700'
+                    }`}
+                  >
+                    <span
+                      className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow-lg transition duration-200 ease-in-out ${
+                        isAdEnabled && availableAdTracks.length > 0 ? 'translate-x-5' : 'translate-x-0'
+                      }`}
+                    />
+                  </button>
+                </div>
+
+                {availableAdTracks.length > 0 ? (
+                  <div className="space-y-1">
+                    <label className="text-[11px] text-neutral-400 block font-medium">Select AD Language</label>
+                    <select
+                      value={selectedAdLang}
+                      onChange={(e) => setSelectedAdLang(e.target.value)}
+                      className="w-full px-3 py-2 rounded-xl bg-neutral-950 border border-neutral-800 text-xs text-white focus:outline-none"
+                    >
+                      {availableAdTracks.map((t) => (
+                        <option key={t.languageCode} value={t.languageCode}>
+                          {t.languageName}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                ) : (
+                  <p className="text-xs text-neutral-400 italic bg-neutral-950 p-2.5 rounded-xl border border-neutral-850">
+                    Audio Description is unavailable for this film.
+                  </p>
                 )}
+
+                <div className="p-2.5 rounded-xl bg-blue-950/20 border border-blue-900/30 flex items-start gap-2 text-[10px] text-blue-300/90 leading-relaxed">
+                  <Info className="w-3.5 h-3.5 text-blue-400 shrink-0 mt-0.5" />
+                  <p>
+                    AD provides synchronized spoken narration to describe visual scenes during dialogue pauses.
+                  </p>
+                </div>
+              </div>
+
+              {/* SECTION 3: CLOSED CAPTIONS (CC) (Top Section 3 of 3) */}
+              <div className="p-3.5 rounded-2xl bg-neutral-900 border border-neutral-800 space-y-3">
+                <div className="flex items-center justify-between pb-2 border-b border-neutral-800">
+                  <div className="flex items-center gap-2">
+                    <div className="w-5 h-5 rounded-full bg-purple-600 text-white font-black text-[10px] flex items-center justify-center shrink-0">
+                      3
+                    </div>
+                    <div>
+                      <h4 className="text-xs font-bold text-white">Closed Captions (CC)</h4>
+                      <p className="text-[9px] text-neutral-400">Enable CC and select language</p>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    disabled={availableCcTracks.length === 0}
+                    onClick={() => setIsCcEnabled(!isCcEnabled)}
+                    className={`relative inline-flex h-5 w-10 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out disabled:opacity-40 ${
+                      isCcEnabled && availableCcTracks.length > 0 ? 'bg-blue-600' : 'bg-neutral-700'
+                    }`}
+                  >
+                    <span
+                      className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow-lg transition duration-200 ease-in-out ${
+                        isCcEnabled && availableCcTracks.length > 0 ? 'translate-x-5' : 'translate-x-0'
+                      }`}
+                    />
+                  </button>
+                </div>
+
+                {availableCcTracks.length > 0 ? (
+                  <div className="space-y-1">
+                    <label className="text-[11px] text-neutral-400 block font-medium">Select CC Language</label>
+                    <select
+                      value={selectedCcLang}
+                      onChange={(e) => setSelectedCcLang(e.target.value)}
+                      className="w-full px-3 py-2 rounded-xl bg-neutral-950 border border-neutral-800 text-xs text-white focus:outline-none"
+                    >
+                      {availableCcTracks.map((t) => (
+                        <option key={t.languageCode} value={t.languageCode}>
+                          {t.languageName}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                ) : (
+                  <p className="text-xs text-neutral-400 italic bg-neutral-950 p-2.5 rounded-xl border border-neutral-850">
+                    Closed Captions are unavailable for this film.
+                  </p>
+                )}
+
+                <div className="p-2.5 rounded-xl bg-purple-950/20 border border-purple-900/30 flex items-start gap-2 text-[10px] text-purple-300/90 leading-relaxed">
+                  <Info className="w-3.5 h-3.5 text-purple-400 shrink-0 mt-0.5" />
+                  <p>
+                    CC controls select the caption language. Synchronized text is displayed below in the dedicated panel.
+                  </p>
+                </div>
+              </div>
+
+              {/* SECTION 4: DEDICATED SYNCHRONIZED CLOSED CAPTIONS (CC) SECTION BELOW VIDEO */}
+              <div className="rounded-2xl bg-neutral-900 border border-neutral-800 overflow-hidden shadow-lg">
+                <div className="px-3.5 py-2.5 bg-rose-500/10 border-b border-rose-500/20 flex items-center gap-2">
+                  <div className="w-6 h-6 rounded-md bg-rose-600 text-white flex items-center justify-center shrink-0">
+                    <Subtitles className="w-3.5 h-3.5" />
+                  </div>
+                  <div>
+                    <span className="text-xs font-bold text-rose-300 block">
+                      Synchronized Closed Captions (CC)
+                    </span>
+                    <span className="text-[9px] text-rose-200/70">
+                      Caption text displayed below video and synchronized with playback
+                    </span>
+                  </div>
+                </div>
+
+                <div className="p-4 bg-neutral-950 text-center min-h-[90px] flex items-center justify-center">
+                  {!isCcEnabled ? (
+                    <p className="text-[11px] text-neutral-500 italic">
+                      Closed Captions are disabled. Toggle CC ON in Section 3 above to view subtitles.
+                    </p>
+                  ) : availableCcTracks.length === 0 ? (
+                    <p className="text-[11px] text-neutral-500 italic">
+                      Closed Captions are unavailable for this film.
+                    </p>
+                  ) : activeCcCue ? (
+                    <div className="space-y-1 animate-fadeIn">
+                      {activeCcCue.speaker && (
+                        <span className="inline-block px-1.5 py-0.2 rounded text-[10px] font-mono text-purple-400 bg-purple-950/80">
+                          [{activeCcCue.speaker}]
+                        </span>
+                      )}
+                      {activeCcCue.soundEffect && (
+                        <p className="text-[10px] font-mono italic text-amber-300/90 mb-0.5">
+                          [{activeCcCue.soundEffect}]
+                        </p>
+                      )}
+                      <p className="text-sm sm:text-base font-medium text-white leading-relaxed break-words font-sans">
+                        {activeCcCue.text}
+                      </p>
+                    </div>
+                  ) : (
+                    <p className="text-xs text-neutral-500 italic">
+                      — No dialogue at this timestamp —
+                    </p>
+                  )}
+                </div>
               </div>
             </div>
-          )}
-        </div>
-      )}
-
-      {/* BOTTOM UPGRADED CONTROL BAR (Mobile-First, Easy to Control All Features) */}
-      <div
-        onClick={(e) => e.stopPropagation()}
-        className={`p-3 sm:p-5 bg-gradient-to-t from-black/98 via-black/85 to-transparent z-40 space-y-2.5 transition-opacity duration-300 ${
-          showControls && !isTouchLocked ? 'opacity-100' : 'opacity-0 pointer-events-none'
-        }`}
-      >
-        {/* Progress Scrubber Slider */}
-        <div className="flex items-center gap-2 sm:gap-3">
-          <span className="font-mono text-neutral-400 text-[11px] sm:text-xs min-w-10 sm:min-w-12 text-right">
-            {formatTime(currentTime)}
-          </span>
-          <div className="relative flex-1 flex items-center group py-1">
-            <input
-              type="range"
-              min={0}
-              max={duration || 100}
-              step={0.1}
-              value={currentTime}
-              onChange={(e) => handleSeek(parseFloat(e.target.value))}
-              className="w-full h-2 sm:h-2.5 bg-neutral-800 rounded-lg appearance-none cursor-pointer accent-amber-500"
-            />
           </div>
-          <span className="font-mono text-neutral-400 text-[11px] sm:text-xs min-w-10 sm:min-w-12">
-            {formatTime(duration)}
-          </span>
-        </div>
+        )}
+      </main>
 
-        {/* Action Controls Row */}
-        <div className="flex flex-wrap items-center justify-between gap-2 sm:gap-3 text-neutral-200 text-xs">
-          {/* Left: Playback & Volume controls */}
-          <div className="flex items-center gap-1.5 sm:gap-2.5">
-            {/* Play/Pause Button */}
-            <button
-              onClick={togglePlay}
-              className="w-11 h-11 sm:w-12 sm:h-12 rounded-2xl bg-amber-500 hover:bg-amber-400 text-neutral-950 flex items-center justify-center font-bold transition-transform active:scale-95 shadow-lg shadow-amber-500/25"
-              title={isPlaying ? 'Pause' : 'Play'}
-            >
-              {isPlaying ? (
-                <Pause className="w-5 h-5 fill-current" />
-              ) : (
-                <Play className="w-5 h-5 fill-current ml-0.5" />
-              )}
-            </button>
-
-            {/* Rewind -10s */}
-            <button
-              onClick={() => handleSkip(-10)}
-              className="p-2 sm:p-2.5 rounded-xl bg-neutral-900/90 hover:bg-neutral-800 text-neutral-300 active:scale-95 transition-colors border border-neutral-800"
-              title="Rewind 10 Seconds"
-            >
-              <RotateCcw className="w-4 h-4" />
-            </button>
-
-            {/* Fast-Forward +10s */}
-            <button
-              onClick={() => handleSkip(10)}
-              className="p-2 sm:p-2.5 rounded-xl bg-neutral-900/90 hover:bg-neutral-800 text-neutral-300 active:scale-95 transition-colors border border-neutral-800"
-              title="Fast Forward 10 Seconds"
-            >
-              <RotateCw className="w-4 h-4" />
-            </button>
-
-            {/* Volume Control */}
-            <div className="flex items-center gap-1 sm:gap-1.5">
-              <button
-                onClick={() => {
-                  if (videoRef.current) {
-                    videoRef.current.muted = !isMuted;
-                    setIsMuted(!isMuted);
-                  }
-                }}
-                className="p-2 text-neutral-400 hover:text-white"
-                title={isMuted ? 'Unmute' : 'Mute'}
-              >
-                {isMuted ? (
-                  <VolumeX className="w-4 h-4 text-rose-400" />
-                ) : (
-                  <Volume2 className="w-4 h-4" />
-                )}
-              </button>
-              <input
-                type="range"
-                min={0}
-                max={1}
-                step={0.05}
-                value={isMuted ? 0 : filmVolume}
-                onChange={(e) => {
-                  const v = parseFloat(e.target.value);
-                  setFilmVolume(v);
-                  setIsMuted(false);
-                  if (videoRef.current) {
-                    videoRef.current.volume = v;
-                    videoRef.current.muted = false;
-                  }
-                }}
-                className="w-12 sm:w-20 h-1.5 bg-neutral-800 rounded-lg appearance-none accent-amber-500 hidden min-[400px]:block"
-              />
-            </div>
-          </div>
-
-          {/* Right: Accessibility & Screen Controls */}
-          <div className="flex items-center gap-1 sm:gap-2 flex-wrap">
-            {/* Quick Closed Caption (CC) Button (Requirement: CC Always Easy to Control) */}
-            <button
-              onClick={() => setActiveSettingsTab(activeSettingsTab === 'cc' ? null : 'cc')}
-              className={`px-2.5 sm:px-3 py-1.5 sm:py-2 rounded-xl text-[11px] sm:text-xs font-mono font-bold flex items-center gap-1.5 border transition-all active:scale-95 ${
-                selectedCcLang !== 'Off'
-                  ? 'bg-amber-500 text-neutral-950 border-amber-400 shadow-md shadow-amber-500/10'
-                  : 'bg-neutral-900 border-neutral-800 text-neutral-400 hover:text-white'
-              }`}
-              title="Closed Captions Settings"
-            >
-              <Subtitles className="w-3.5 h-3.5" />
-              <span>CC: {selectedCcLang.toUpperCase()}</span>
-            </button>
-
-            {/* Quick Audio Description (AD) Button */}
-            <button
-              onClick={() => setActiveSettingsTab(activeSettingsTab === 'ad' ? null : 'ad')}
-              className={`px-2.5 sm:px-3 py-1.5 sm:py-2 rounded-xl text-[11px] sm:text-xs font-mono font-bold flex items-center gap-1.5 border transition-all active:scale-95 ${
-                selectedAdLang !== 'Off'
-                  ? 'bg-emerald-500 text-neutral-950 border-emerald-400 shadow-md shadow-emerald-500/10'
-                  : 'bg-neutral-900 border-neutral-800 text-neutral-400 hover:text-white'
-              }`}
-              title="Audio Description Settings"
-            >
-              <Headphones className="w-3.5 h-3.5" />
-              <span>AD: {selectedAdLang.toUpperCase()}</span>
-            </button>
-
-            {/* Speed Selector */}
-            <button
-              onClick={() => setActiveSettingsTab(activeSettingsTab === 'speed' ? null : 'speed')}
-              className="px-2 py-1.5 rounded-xl bg-neutral-900/90 hover:bg-neutral-800 border border-neutral-800 text-[11px] font-mono text-neutral-300 transition-colors"
-              title="Playback Speed"
-            >
-              <span>{playbackSpeed}x</span>
-            </button>
-
-            {/* Stream Selector / Troubleshooter */}
-            <button
-              onClick={() => setActiveSettingsTab(activeSettingsTab === 'source' ? null : 'source')}
-              className="p-2 sm:p-2.5 rounded-xl bg-neutral-900/90 hover:bg-neutral-800 border border-neutral-800 text-neutral-300 transition-colors"
-              title="Switch Video Stream Source (Troubleshooter for mobile)"
-            >
-              <Sliders className="w-3.5 h-3.5" />
-            </button>
-
-            {/* Zero-Buffer Local Device Storage Button */}
-            <button
-              onClick={() => {
-                if (isLocalBlobActive) {
-                  setIsDownloadModalOpen(true);
-                } else {
-                  startZeroBufferDownload();
-                }
-              }}
-              className={`p-2 sm:p-2.5 rounded-xl border transition-colors flex items-center gap-1.5 ${
-                isLocalBlobActive
-                  ? 'bg-emerald-950/80 border-emerald-500/80 text-emerald-300'
-                  : 'bg-neutral-900/90 hover:bg-neutral-800 border-neutral-800 text-neutral-300 hover:text-amber-300'
-              }`}
-              title={
-                isLocalBlobActive
-                  ? 'Zero-Buffer Local Storage Active (0 KB/s network usage)'
-                  : 'Download to Local Device (Zero-Buffer Playback)'
-              }
-            >
-              {isLocalBlobActive ? (
-                <HardDrive className="w-3.5 h-3.5 text-emerald-400" />
-              ) : (
-                <Download className="w-3.5 h-3.5 text-amber-400" />
-              )}
-            </button>
-
-            {/* Dark Theatre OLED Blackout */}
-            <button
-              onClick={() => setIsBlackoutActive(true)}
-              className="p-2 sm:p-2.5 rounded-xl bg-neutral-900/90 hover:bg-neutral-800 border border-neutral-800 text-neutral-300 transition-colors"
-              title="Cinema OLED Blackout Mode (Pure Black Display)"
-            >
-              <Moon className="w-3.5 h-3.5" />
-            </button>
-
-            {/* Fullscreen Button */}
-            <button
-              onClick={toggleFullscreen}
-              className="p-2 sm:p-2.5 rounded-xl bg-neutral-900/90 hover:bg-neutral-800 border border-neutral-800 text-neutral-300 hover:text-white transition-colors"
-              title="Toggle Fullscreen"
-            >
-              {isFullscreen ? <Minimize className="w-3.5 h-3.5" /> : <Maximize className="w-3.5 h-3.5" />}
-            </button>
-          </div>
-        </div>
-      </div>
-
-      {/* ZERO-BUFFER LOCAL DEVICE DOWNLOAD & STORAGE MODAL */}
+      {/* ZERO-BUFFER OFFLINE DOWNLOAD MODAL */}
       {isDownloadModalOpen && (
         <div
           onClick={(e) => e.stopPropagation()}
           className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-md animate-fadeIn"
         >
-          <div className="relative w-full max-w-md p-6 rounded-3xl bg-neutral-900/98 border border-neutral-800 text-neutral-100 shadow-2xl space-y-4">
-            <button
-              onClick={() => {
-                if (isDownloading) cancelDownload();
-                else setIsDownloadModalOpen(false);
-              }}
-              className="absolute top-4 right-4 p-1.5 rounded-lg text-neutral-400 hover:text-white bg-neutral-800/80 transition-colors"
-            >
-              <X className="w-4 h-4" />
-            </button>
-
-            {/* Header */}
-            <div className="flex items-center gap-3">
-              <div className="w-12 h-12 rounded-2xl bg-amber-500/20 border border-amber-500/40 flex items-center justify-center text-amber-400 shrink-0 shadow-lg shadow-amber-500/10">
-                {isDownloading ? (
-                  <Loader2 className="w-6 h-6 animate-spin" />
-                ) : isLocalBlobActive ? (
-                  <HardDrive className="w-6 h-6 text-emerald-400" />
-                ) : (
-                  <Zap className="w-6 h-6 text-amber-400" />
-                )}
+          <div className="w-full max-w-md p-6 rounded-3xl bg-neutral-900 border border-neutral-800 text-neutral-100 shadow-2xl space-y-4">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2.5">
+                <div className="w-10 h-10 rounded-xl bg-amber-500/20 text-amber-400 flex items-center justify-center">
+                  <Download className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-white uppercase">Zero-Buffer Download</h3>
+                  <p className="text-[11px] text-neutral-400">Save to local device storage</p>
+                </div>
               </div>
-              <div>
-                <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-amber-500/15 border border-amber-500/40 text-amber-300 font-bold uppercase tracking-wider">
-                  {isDownloading
-                    ? 'DOWNLOADING TO LOCAL SANDBOX'
-                    : isLocalBlobActive
-                    ? 'LOCAL ZERO-BUFFER ACTIVE'
-                    : 'OFFLINE DOWNLOAD ENGINE'}
-                </span>
-                <h3 className="text-base font-black text-white uppercase tracking-wide mt-1 line-clamp-1">
-                  {film.title}
-                </h3>
-              </div>
+              <button onClick={() => setIsDownloadModalOpen(false)} className="text-neutral-400 hover:text-white">
+                <X className="w-4 h-4" />
+              </button>
             </div>
 
-            {/* Content during Download */}
-            {isDownloading && (
-              <div className="space-y-3 pt-1">
-                <div className="p-3.5 rounded-2xl bg-neutral-950 border border-neutral-800 space-y-2.5">
-                  <div className="flex items-center justify-between text-xs font-mono font-bold">
-                    <span className="text-amber-400 flex items-center gap-1.5">
-                      <Download className="w-3.5 h-3.5 animate-bounce" />
-                      <span>
-                        {downloadProgress?.status === 'saving'
-                          ? 'Encrypting & Storing in IndexedDB...'
-                          : downloadProgress?.status === 'connecting'
-                          ? 'Connecting to Cinema Master Stream...'
-                          : 'Downloading Video Chunks...'}
-                      </span>
-                    </span>
-                    <span className="text-white text-sm">
-                      {downloadProgress?.percent || 0}%
-                    </span>
-                  </div>
-
-                  {/* Progress Bar */}
-                  <div className="w-full bg-neutral-800 h-2.5 rounded-full overflow-hidden p-0.5">
-                    <div
-                      className="bg-gradient-to-r from-amber-500 to-amber-400 h-full rounded-full transition-all duration-150"
-                      style={{ width: `${downloadProgress?.percent || 0}%` }}
-                    />
-                  </div>
-
-                  {/* Stats: MB, Speed, ETA */}
-                  <div className="grid grid-cols-3 gap-2 pt-1 text-[10px] font-mono text-neutral-400 text-center">
-                    <div className="p-1.5 rounded-lg bg-neutral-900 border border-neutral-800/80">
-                      <span className="text-neutral-500 block">TRANSFERRED</span>
-                      <span className="font-bold text-neutral-200">
-                        {downloadProgress?.loadedBytes
-                          ? `${(downloadProgress.loadedBytes / (1024 * 1024)).toFixed(1)} MB`
-                          : 'Preparing...'}
-                      </span>
-                    </div>
-                    <div className="p-1.5 rounded-lg bg-neutral-900 border border-neutral-800/80">
-                      <span className="text-neutral-500 block">SPEED</span>
-                      <span className="font-bold text-neutral-200">
-                        {downloadProgress?.speedMbps ? `${downloadProgress.speedMbps} Mbps` : '18.4 Mbps'}
-                      </span>
-                    </div>
-                    <div className="p-1.5 rounded-lg bg-neutral-900 border border-neutral-800/80">
-                      <span className="text-neutral-500 block">EST. TIME</span>
-                      <span className="font-bold text-neutral-200">
-                        {downloadProgress?.etaSeconds !== undefined
-                          ? `~${downloadProgress.etaSeconds}s`
-                          : '~2s'}
-                      </span>
-                    </div>
-                  </div>
+            {isDownloading ? (
+              <div className="space-y-2.5 p-3 rounded-xl bg-neutral-950 border border-neutral-800 text-xs font-mono">
+                <div className="flex justify-between text-amber-400 font-bold">
+                  <span>Downloading Video...</span>
+                  <span>{downloadProgress?.percent || 0}%</span>
                 </div>
-
-                {downloadError && (
-                  <p className="text-xs text-rose-400 font-mono text-center">{downloadError}</p>
-                )}
-
-                <button
-                  onClick={cancelDownload}
-                  className="w-full py-2.5 rounded-xl bg-neutral-800 hover:bg-neutral-700 text-neutral-300 text-xs font-bold uppercase transition-colors"
-                >
-                  Cancel Download
-                </button>
-              </div>
-            )}
-
-            {/* Content when already downloaded */}
-            {!isDownloading && isLocalBlobActive && (
-              <div className="space-y-3.5 pt-1">
-                <div className="p-3.5 rounded-2xl bg-emerald-950/40 border border-emerald-500/40 space-y-2 text-xs">
-                  <div className="flex items-center gap-2 text-emerald-300 font-bold">
-                    <Check className="w-4 h-4 text-emerald-400 shrink-0" />
-                    <span>Video Saved in Device Sandbox</span>
-                  </div>
-                  <p className="text-[11px] text-emerald-200/80 leading-relaxed">
-                    This video is loaded directly from local device memory. Enjoy seamless playback with zero buffering, instant seeking, and no data consumption.
-                  </p>
-                </div>
-
-                <div className="grid grid-cols-2 gap-2 text-[11px] font-mono">
-                  <div className="p-2.5 rounded-xl bg-neutral-950 border border-neutral-800">
-                    <span className="text-neutral-500 block text-[10px]">STORAGE LOCATION</span>
-                    <span className="text-neutral-200 font-bold">IndexedDB Sandbox</span>
-                  </div>
-                  <div className="p-2.5 rounded-xl bg-neutral-950 border border-neutral-800">
-                    <span className="text-neutral-500 block text-[10px]">PLAYBACK LATENCY</span>
-                    <span className="text-emerald-400 font-bold">0ms (Zero Buffer)</span>
-                  </div>
-                </div>
-
-                <div className="flex gap-2 pt-1">
-                  <button
-                    onClick={() => setIsDownloadModalOpen(false)}
-                    className="flex-1 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-neutral-950 text-xs font-bold uppercase shadow-md shadow-amber-500/20 transition-all"
-                  >
-                    Resume Screening
-                  </button>
-                  <button
-                    onClick={handleDeleteLocalCopy}
-                    className="p-2.5 rounded-xl bg-neutral-800 hover:bg-rose-950/80 hover:text-rose-400 text-neutral-400 border border-neutral-700 transition-colors"
-                    title="Delete local copy"
-                  >
-                    <Trash2 className="w-4 h-4" />
-                  </button>
+                <div className="w-full bg-neutral-800 h-2 rounded-full overflow-hidden">
+                  <div
+                    className="bg-amber-500 h-full transition-all duration-150"
+                    style={{ width: `${downloadProgress?.percent || 0}%` }}
+                  />
                 </div>
               </div>
-            )}
-
-            {/* Content when not yet downloaded and not downloading */}
-            {!isDownloading && !isLocalBlobActive && (
-              <div className="space-y-3 pt-1">
-                <p className="text-xs text-neutral-300 leading-relaxed">
-                  Download the complete video package to your local device. The video will play natively from your device storage with <strong>zero buffering</strong>.
-                </p>
-                <button
-                  onClick={startZeroBufferDownload}
-                  className="w-full py-3 rounded-2xl bg-amber-500 hover:bg-amber-400 text-neutral-950 text-xs font-black uppercase tracking-wider flex items-center justify-center gap-2 shadow-lg shadow-amber-500/20 transition-all"
-                >
-                  <Download className="w-4 h-4" />
-                  <span>Start Zero-Buffer Download</span>
-                </button>
-              </div>
+            ) : (
+              <p className="text-xs text-neutral-300">
+                Download completed. The video is now loaded from your local device sandbox with 0ms buffering!
+              </p>
             )}
           </div>
         </div>
-      )}
-
-      {/* MOBILE QR CODE COMPANION SCANNER MODAL */}
-      {isQrScannerOpen && (
-        <SecurePlayerQRScannerOverlay
-          film={film}
-          sessionToken={sessionToken}
-          currentTime={currentTime}
-          selectedCcLang={selectedCcLang}
-          selectedAdLang={selectedAdLang}
-          syncOffsetMs={syncOffsetMs}
-          isOpen={isQrScannerOpen}
-          onClose={() => setIsQrScannerOpen(false)}
-          onDevicePaired={(device, syncTimestamp) => {
-            setPairedMobileDevice(device);
-            if (device.adLanguage && device.adLanguage !== 'Off') {
-              setSelectedAdLang(device.adLanguage);
-            }
-            if (device.ccLanguage && device.ccLanguage !== 'Off') {
-              setSelectedCcLang(device.ccLanguage);
-            }
-            setHeadphoneConnected(true);
-            if (typeof syncTimestamp === 'number' && videoRef.current && Number.isFinite(syncTimestamp)) {
-              videoRef.current.currentTime = syncTimestamp;
-              setCurrentTime(syncTimestamp);
-            }
-            setIsQrScannerOpen(false);
-          }}
-        />
       )}
     </div>
   );

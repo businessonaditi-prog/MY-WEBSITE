@@ -649,7 +649,7 @@ export const CommonFilmGallery: React.FC<CommonFilmGalleryProps> = ({
 
             {/* 6. PLAYBACK AUTHORIZATION: 9-DIGIT CODE MANDATORY FOR GUESTS */}
             <div className="mt-5 pt-4 border-t border-neutral-800 space-y-3">
-              {currentUser && currentUser.productionHouseName === detailsFilm.productionHouseName ? (
+              {isFilmOwner(detailsFilm) ? (
                 // OWNER ACCESS: CAN PLAY WITHOUT CODE
                 <div className="flex items-center justify-between bg-emerald-950/40 border border-emerald-600/40 p-4 rounded-xl">
                   <div>
