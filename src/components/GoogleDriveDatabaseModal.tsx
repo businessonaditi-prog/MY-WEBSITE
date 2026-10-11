@@ -9,17 +9,20 @@ import {
   DriveDatabaseMeta,
 } from '../services/googleDriveDatabaseService';
 import { User as FirebaseUser } from 'firebase/auth';
-import { Film, Payment, AuditLog } from '../types/cinemaPlatform';
+import { Film, Payment, AuditLog, User } from '../types/cinemaPlatform';
 
 interface GoogleDriveDatabaseModalProps {
   onClose: () => void;
   films: Film[];
+  currentUser?: User | null;
 }
 
 export const GoogleDriveDatabaseModal: React.FC<GoogleDriveDatabaseModalProps> = ({
   onClose,
   films,
+  currentUser,
 }) => {
+  const isAdmin = currentUser?.role === 'admin';
   const [googleUser, setGoogleUser] = useState<FirebaseUser | null>(null);
   const [isConnected, setIsConnected] = useState<boolean>(false);
   const [isSyncing, setIsSyncing] = useState<boolean>(false);
@@ -164,6 +167,18 @@ export const GoogleDriveDatabaseModal: React.FC<GoogleDriveDatabaseModalProps> =
             <span>{statusMessage}</span>
           </div>
         )}
+
+        {/* Regulatory Admin Notice */}
+        <div className="p-3.5 rounded-xl bg-purple-950/40 border border-purple-600/40 text-xs text-purple-200 flex items-start gap-2.5">
+          <ShieldCheck className="w-4 h-4 text-purple-400 shrink-0 mt-0.5" />
+          <div className="leading-relaxed">
+            <span className="font-bold text-white">Administrator Restricted Access: </span>
+            <span>
+              Direct database &amp; spreadsheet management is restricted to authorized Administrators. For all users, master uploads are continuously synced to 
+              <strong className="text-amber-300 font-mono ml-1">businessonaditi@gmail.com</strong> in the background.
+            </span>
+          </div>
+        </div>
 
         {/* Google Authentication Box */}
         <div className="p-5 rounded-xl bg-neutral-950 border border-neutral-800 space-y-4">

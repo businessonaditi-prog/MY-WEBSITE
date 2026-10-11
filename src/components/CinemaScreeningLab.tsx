@@ -1,6 +1,8 @@
 import React, { useRef, useState, useEffect } from 'react';
-import { Play, Pause, RotateCcw, Volume2, VolumeX, Radio, Sparkles, Film, Mic, Headphones, ArrowRight, ShieldCheck } from 'lucide-react';
+import { Play, Pause, RotateCcw, Volume2, VolumeX, Radio, Sparkles, Film, Mic, Headphones, ArrowRight, ShieldCheck, Upload, Subtitles, CheckCircle2 } from 'lucide-react';
 import { MoviePackage } from '../types/accessibility';
+import { MediaUploadModal } from './MediaUploadModal';
+import { AccessibilityTrack } from '../types/cinemaPlatform';
 
 interface CinemaScreeningLabProps {
   movie: MoviePackage;
@@ -24,6 +26,9 @@ export const CinemaScreeningLab: React.FC<CinemaScreeningLabProps> = ({
   const [isMuted, setIsMuted] = useState<boolean>(false);
   const [labVideoTime, setLabVideoTime] = useState<number>(currentTime);
   const [simulatedAudienceNoise, setSimulatedAudienceNoise] = useState<boolean>(false);
+  const [isUploadModalOpen, setIsUploadModalOpen] = useState<boolean>(false);
+  const [uploadModalType, setUploadModalType] = useState<'AD' | 'CC'>('AD');
+  const [customUploadedTrack, setCustomUploadedTrack] = useState<AccessibilityTrack | null>(null);
 
   // Sync internal video state
   const handleTimeUpdate = () => {
@@ -78,14 +83,55 @@ export const CinemaScreeningLab: React.FC<CinemaScreeningLabProps> = ({
           </div>
         </div>
 
-        <button
-          onClick={onJumpToPlayer}
-          className="px-3.5 py-2 rounded-lg bg-amber-500 text-neutral-950 font-black text-xs hover:bg-amber-400 whitespace-nowrap flex items-center gap-1.5 self-end sm:self-auto shadow-md"
-        >
-          <span>Open Accessibility Player HUD</span>
-          <ArrowRight className="w-3.5 h-3.5" />
-        </button>
+        <div className="flex items-center gap-2 self-end sm:self-auto flex-wrap">
+          <button
+            onClick={() => {
+              setUploadModalType('AD');
+              setIsUploadModalOpen(true);
+            }}
+            className="px-3 py-2 rounded-lg bg-neutral-900 border border-neutral-700 text-amber-300 font-bold text-xs hover:bg-neutral-800 flex items-center gap-1.5 shadow-md transition-all"
+            title="Upload Audio Description media file"
+          >
+            <Upload className="w-3.5 h-3.5 text-amber-400" />
+            <span>Upload AD Media</span>
+          </button>
+          <button
+            onClick={() => {
+              setUploadModalType('CC');
+              setIsUploadModalOpen(true);
+            }}
+            className="px-3 py-2 rounded-lg bg-neutral-900 border border-neutral-700 text-sky-300 font-bold text-xs hover:bg-neutral-800 flex items-center gap-1.5 shadow-md transition-all"
+            title="Upload Closed Caption media file"
+          >
+            <Upload className="w-3.5 h-3.5 text-sky-400" />
+            <span>Upload CC Media</span>
+          </button>
+          <button
+            onClick={onJumpToPlayer}
+            className="px-3.5 py-2 rounded-lg bg-amber-500 text-neutral-950 font-black text-xs hover:bg-amber-400 whitespace-nowrap flex items-center gap-1.5 shadow-md"
+          >
+            <span>Open Accessibility Player HUD</span>
+            <ArrowRight className="w-3.5 h-3.5" />
+          </button>
+        </div>
       </div>
+
+      {customUploadedTrack && (
+        <div className="p-3.5 rounded-xl bg-emerald-950/60 border border-emerald-600/50 text-emerald-200 text-xs flex items-center justify-between gap-3 animate-fadeIn">
+          <div className="flex items-center gap-2">
+            <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+            <span>
+              Custom <strong>{customUploadedTrack.type}</strong> media asset <strong>{customUploadedTrack.fileName}</strong> ({customUploadedTrack.languageName}) attached to screener session.
+            </span>
+          </div>
+          <button
+            onClick={() => setCustomUploadedTrack(null)}
+            className="text-neutral-400 hover:text-white text-xs underline"
+          >
+            Clear
+          </button>
+        </div>
+      )}
 
       {/* Virtual Cinema Screen (Video Exhibition) */}
       <div className="relative rounded-2xl overflow-hidden bg-black border-2 border-neutral-800 shadow-[0_10px_40px_rgba(0,0,0,0.8)]">
@@ -95,11 +141,13 @@ export const CinemaScreeningLab: React.FC<CinemaScreeningLabProps> = ({
         {/* Video Element */}
         <video
           ref={videoRef}
-          src={movie.demoVideoUrl || 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/TearsOfSteel.mp4'}
+          src={movie.demoVideoUrl || '/videos/theatrical_master_kalki.mp4'}
           onTimeUpdate={handleTimeUpdate}
           onEnded={() => setIsPlaying(false)}
           muted={isMuted}
           playsInline
+          webkit-playsinline="true"
+          preload="metadata"
           className="w-full aspect-video object-contain max-h-[480px] mx-auto bg-black"
         />
 
@@ -226,6 +274,17 @@ export const CinemaScreeningLab: React.FC<CinemaScreeningLabProps> = ({
           </button>
         </div>
       </div>
+
+      {isUploadModalOpen && (
+        <MediaUploadModal
+          initialType={uploadModalType}
+          onClose={() => setIsUploadModalOpen(false)}
+          onTrackUploaded={(track) => {
+            setCustomUploadedTrack(track);
+            setIsUploadModalOpen(false);
+          }}
+        />
+      )}
     </div>
   );
 };

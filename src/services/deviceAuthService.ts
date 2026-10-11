@@ -23,29 +23,50 @@ export const deviceAuthService = {
     return id;
   },
 
-  // Get currently registered device profile
+  // Get currently registered device profile (Never returns admin profiles)
   getRegisteredProfile(): RegisteredDeviceProfile | null {
     try {
       const data = localStorage.getItem(REGISTERED_DEVICE_KEY);
       if (!data) return null;
-      return JSON.parse(data) as RegisteredDeviceProfile;
+      const profile = JSON.parse(data) as RegisteredDeviceProfile;
+      // Strict security: Administrator credentials must NEVER be remembered or bound by browser
+      if (profile.role === 'admin' || profile.email.toLowerCase().includes('pikuvfx')) {
+        localStorage.removeItem(REGISTERED_DEVICE_KEY);
+        return null;
+      }
+      return profile;
     } catch {
       return null;
     }
   },
 
-  // Register or update current device for a user
+  // Register or update current device for a user (Never saves admin profiles)
   registerDevice(email: string, productionHouseName?: string, role?: string): RegisteredDeviceProfile {
     const deviceId = this.getDeviceId();
     const now = new Date().toISOString();
+    const cleanEmail = email.trim().toLowerCase();
+
+    // Security policy: Admin credentials must NEVER be remembered by browser/device
+    if (role === 'admin' || cleanEmail.includes('pikuvfx')) {
+      localStorage.removeItem(REGISTERED_DEVICE_KEY);
+      return {
+        deviceId,
+        email: cleanEmail,
+        productionHouseName: productionHouseName || 'Admin Console',
+        role: 'admin',
+        registeredAt: now,
+        lastLoginAt: now,
+      };
+    }
+
     const existing = this.getRegisteredProfile();
 
     const profile: RegisteredDeviceProfile = {
       deviceId,
-      email: email.trim().toLowerCase(),
+      email: cleanEmail,
       productionHouseName: productionHouseName || existing?.productionHouseName || 'Official Entity',
       role: role || existing?.role || 'production_house',
-      registeredAt: existing?.email === email.trim().toLowerCase() ? existing.registeredAt : now,
+      registeredAt: existing?.email === cleanEmail ? existing.registeredAt : now,
       lastLoginAt: now,
     };
 

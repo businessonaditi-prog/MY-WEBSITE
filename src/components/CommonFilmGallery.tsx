@@ -17,6 +17,7 @@ import {
   UserCheck,
   KeyRound,
   ArrowRight,
+  Copy,
 } from 'lucide-react';
 import { Film, User } from '../types/cinemaPlatform';
 import { INDIAN_LANGUAGES } from '../utils/languages';
@@ -57,11 +58,12 @@ export const CommonFilmGallery: React.FC<CommonFilmGalleryProps> = ({
   const [showCodeInput, setShowCodeInput] = useState(false);
   const [code, setCode] = useState('');
   const [codeError, setCodeError] = useState<string | null>(null);
+  const [copiedCodeId, setCopiedCodeId] = useState<string | null>(null);
 
   useEffect(() => {
     fetchFilms();
     refreshOfflineState();
-  }, [refreshTrigger]);
+  }, [refreshTrigger, currentUser]);
 
   const refreshOfflineState = () => {
     setDownloadedFilmIds(offlineStorage.getDownloadedFilmIds());
@@ -71,7 +73,12 @@ export const CommonFilmGallery: React.FC<CommonFilmGalleryProps> = ({
   const fetchFilms = async () => {
     setLoading(true);
     try {
-      const res = await fetch('/api/films');
+      const headers: Record<string, string> = {};
+      const token = localStorage.getItem('cbfc_auth_token');
+      if (token) {
+        headers['Authorization'] = `Bearer ${token}`;
+      }
+      const res = await fetch('/api/films', { headers });
       const data = await res.json();
       setFilms(data.films || []);
     } catch (e) {
@@ -85,13 +92,18 @@ export const CommonFilmGallery: React.FC<CommonFilmGalleryProps> = ({
     e?.stopPropagation();
     if (downloadingMap[film.id] !== undefined) return;
 
-    setDownloadingMap((prev) => ({ ...prev, [film.id]: 15 }));
+    setDownloadingMap((prev) => ({ ...prev, [film.id]: 10 }));
     try {
-      await offlineStorage.downloadForInAppOffline(
+      const streamUrl =
+        film.videoFileUrl && !film.videoFileUrl.includes('gtv-videos-bucket')
+          ? film.videoFileUrl
+          : '/videos/theatrical_master_kalki.mp4';
+
+      await offlineStorage.downloadVideoForZeroBufferPlayback(
         film.id,
         film.title,
-        film.isDcp ? '68.4 MB' : '42.8 MB',
-        (pct) => setDownloadingMap((prev) => ({ ...prev, [film.id]: pct })),
+        streamUrl,
+        (progress) => setDownloadingMap((prev) => ({ ...prev, [film.id]: progress.percent })),
         film
       );
       refreshOfflineState();
@@ -112,13 +124,31 @@ export const CommonFilmGallery: React.FC<CommonFilmGalleryProps> = ({
     refreshOfflineState();
   };
 
-  // Open modal and immediately activate 9-digit code requirement for guests
+  // Check if current logged-in user is the verified owner of a film
+  const isFilmOwner = (film: Film): boolean => {
+    if (!currentUser) return false;
+    if (film.isOwner) return true;
+    if (film.userId && film.userId === currentUser.id) return true;
+    if (currentUser.productionHouseName && film.productionHouseName &&
+        currentUser.productionHouseName.toLowerCase() === film.productionHouseName.toLowerCase()) {
+      return true;
+    }
+    return false;
+  };
+
+  const handleCopyCode = (filmId: string, codeToCopy: string, e?: React.MouseEvent) => {
+    e?.stopPropagation();
+    navigator.clipboard.writeText(codeToCopy);
+    setCopiedCodeId(filmId);
+    setTimeout(() => setCopiedCodeId(null), 2000);
+  };
+
+  // Open modal - if current user is owner, they can watch directly; others must enter code
   const handleFilmCardClick = (film: Film) => {
     setDetailsFilm(film);
     setCode('');
     setCodeError(null);
-    // If current user is owner, they can watch directly; otherwise, prompt code
-    if (currentUser && currentUser.productionHouseName === film.productionHouseName) {
+    if (isFilmOwner(film)) {
       setShowCodeInput(false);
     } else {
       setShowCodeInput(true);
@@ -304,6 +334,7 @@ export const CommonFilmGallery: React.FC<CommonFilmGalleryProps> = ({
             const isDownloaded = downloadedFilmIds.includes(film.id);
             const downloadProgress = downloadingMap[film.id];
             const isDownloading = downloadProgress !== undefined;
+            const isOwner = isFilmOwner(film);
 
             return (
               <div
@@ -362,19 +393,78 @@ export const CommonFilmGallery: React.FC<CommonFilmGalleryProps> = ({
                     </p>
                   </div>
 
-                  {/* ACTIONS BELOW THUMBNAIL */}
+                  {/* ACTIONS & CODE DISPLAY BELOW THUMBNAIL */}
                   <div className="pt-2 border-t border-neutral-800/80 flex flex-col gap-2">
-                    {/* Primary Button: Enter Code to Play */}
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        handleFilmCardClick(film);
-                      }}
-                      className="w-full py-2 px-2.5 rounded-xl bg-amber-500/15 hover:bg-amber-500 text-amber-300 hover:text-neutral-950 border border-amber-500/40 text-xs font-mono font-bold flex items-center justify-center gap-1.5 transition-all shadow-md active:scale-98"
-                    >
-                      <Lock className="w-3.5 h-3.5" />
-                      <span>ENTER CODE TO PLAY</span>
-                    </button>
+                    {/* If current user is the owner of this film: show code below thumbnail & allow 1-click play without code */}
+                    {isOwner ? (
+                      <div className="space-y-2">
+                        {/* 9-Digit Code Display below thumbnail of own film */}
+                        {film.previewCode ? (
+                          <div className="p-2 rounded-xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-between text-xs font-mono">
+                            <div>
+                              <span className="text-[9px] text-amber-400 font-bold block uppercase tracking-wider">
+                                YOUR 9-DIGIT CODE:
+                              </span>
+                              <span className="text-amber-300 font-black text-sm tracking-wider">
+                                {film.previewCode}
+                              </span>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={(e) => handleCopyCode(film.id, film.previewCode!, e)}
+                              className="px-2 py-1 rounded bg-amber-500/20 hover:bg-amber-500 text-amber-300 hover:text-neutral-950 font-bold text-[10px] flex items-center gap-1 transition-all"
+                              title="Copy your film preview code to share"
+                            >
+                              {copiedCodeId === film.id ? (
+                                <>
+                                  <Check className="w-3 h-3 text-emerald-400" />
+                                  <span>COPIED</span>
+                                </>
+                              ) : (
+                                <>
+                                  <Copy className="w-3 h-3" />
+                                  <span>COPY</span>
+                                </>
+                              )}
+                            </button>
+                          </div>
+                        ) : (
+                          <div className="px-2 py-1 rounded bg-neutral-950/80 border border-neutral-800 text-[10px] font-mono text-emerald-400 flex items-center gap-1.5">
+                            <Check className="w-3 h-3" />
+                            <span>YOUR UPLOADED FILM • OWNER ACCESS ACTIVE</span>
+                          </div>
+                        )}
+
+                        {/* Owner 1-Click Play - No Code Required */}
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onOwnerWatchFilm(film);
+                          }}
+                          className="w-full py-2.5 px-3 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-neutral-950 text-xs font-mono font-black uppercase flex items-center justify-center gap-1.5 shadow-md shadow-emerald-500/20 active:scale-98 transition-all"
+                        >
+                          <Play className="w-3.5 h-3.5 fill-current" />
+                          <span>PLAY FILM (OWNER - NO CODE)</span>
+                        </button>
+                      </div>
+                    ) : (
+                      /* Other user's film: Protected. Cannot be played without code! */
+                      <div className="space-y-1">
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleFilmCardClick(film);
+                          }}
+                          className="w-full py-2 px-2.5 rounded-xl bg-amber-500/15 hover:bg-amber-500 text-amber-300 hover:text-neutral-950 border border-amber-500/40 text-xs font-mono font-bold flex items-center justify-center gap-1.5 transition-all shadow-md active:scale-98"
+                        >
+                          <Lock className="w-3.5 h-3.5" />
+                          <span>ENTER CODE TO PLAY</span>
+                        </button>
+                        <span className="text-[10px] font-mono text-neutral-500 block text-center">
+                          Code required from filmmaker
+                        </span>
+                      </div>
+                    )}
 
                     {/* Download / Storage option */}
                     {isDownloading ? (
@@ -393,21 +483,23 @@ export const CommonFilmGallery: React.FC<CommonFilmGalleryProps> = ({
                     ) : (
                       <div className="flex items-center justify-between text-[10px] text-neutral-400 pt-1">
                         {isDownloaded ? (
-                          <span className="flex items-center gap-1 text-emerald-400 font-mono">
+                          <span className="flex items-center gap-1 text-emerald-400 font-mono" title="Saved locally - 100% zero-buffering playback">
                             <Check className="w-3 h-3" />
-                            <span>Saved Offline</span>
+                            <span>Zero-Buffer Ready</span>
                           </span>
                         ) : (
                           <button
                             onClick={(e) => handleDownloadFilm(film, e)}
                             className="text-neutral-400 hover:text-amber-300 flex items-center gap-1 transition-colors"
-                            title="Download in-app (won't save to device gallery)"
+                            title="Download to local device for zero-buffering playback"
                           >
                             <Download className="w-3 h-3" />
-                            <span>Download In-App</span>
+                            <span>Download (Zero Buffer)</span>
                           </button>
                         )}
-                        <span className="font-mono text-neutral-400">Code Required</span>
+                        <span className="font-mono text-neutral-400">
+                          {isOwner ? 'Owner Unlocked' : 'Code Protected'}
+                        </span>
                       </div>
                     )}
                   </div>
@@ -479,7 +571,7 @@ export const CommonFilmGallery: React.FC<CommonFilmGalleryProps> = ({
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2 font-mono text-xs font-bold text-neutral-200">
                   <HardDrive className="w-4 h-4 text-emerald-400" />
-                  <span>IN-APP ENCRYPTED OFFLINE SANDBOX</span>
+                  <span>IN-APP ENCRYPTED OFFLINE SANDBOX (ZERO-BUFFER ENGINE)</span>
                 </div>
                 <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-neutral-900 text-neutral-400">
                   IndexedDB Storage
@@ -487,13 +579,13 @@ export const CommonFilmGallery: React.FC<CommonFilmGalleryProps> = ({
               </div>
 
               <p className="text-xs text-neutral-400 leading-relaxed">
-                Download to view inside CINEAD.CC even when offline. <strong>This file is NOT saved to your phone gallery or device media library</strong>.
+                Download to view inside CINEAD.CC with <strong>100% zero network buffering</strong> and offline capability. <strong>This file is NOT saved to your phone gallery or device media library</strong>.
               </p>
 
               {downloadingMap[detailsFilm.id] !== undefined ? (
                 <div className="space-y-1.5 p-3 rounded-lg bg-neutral-900 border border-neutral-800">
                   <div className="flex justify-between text-xs font-mono text-amber-400 font-bold">
-                    <span>Downloading to In-App Sandbox...</span>
+                    <span>Downloading to Device Sandbox...</span>
                     <span>{downloadingMap[detailsFilm.id]}%</span>
                   </div>
                   <div className="w-full bg-neutral-800 h-2 rounded-full overflow-hidden">
@@ -508,8 +600,8 @@ export const CommonFilmGallery: React.FC<CommonFilmGalleryProps> = ({
                   <div className="flex items-center gap-2">
                     <Check className="w-4 h-4 text-emerald-400 shrink-0" />
                     <div>
-                      <span className="font-bold text-emerald-300 block">Saved In App Sandbox (42.8 MB)</span>
-                      <span className="text-[11px] text-emerald-200/70">Requires 9-digit code to play.</span>
+                      <span className="font-bold text-emerald-300 block">Saved In App Sandbox (Zero-Buffer Ready)</span>
+                      <span className="text-[11px] text-emerald-200/70">Plays with 0ms buffering. Requires 9-digit code.</span>
                     </div>
                   </div>
                   <button
@@ -526,7 +618,7 @@ export const CommonFilmGallery: React.FC<CommonFilmGalleryProps> = ({
                   className="w-full py-2.5 rounded-xl bg-neutral-900 hover:bg-neutral-800 border border-neutral-700 text-neutral-200 hover:text-white text-xs font-bold flex items-center justify-center gap-2 transition-colors"
                 >
                   <Download className="w-4 h-4 text-amber-400" />
-                  <span>Download for In-App Offline Playback</span>
+                  <span>Download for Zero-Buffer Offline Playback</span>
                 </button>
               )}
             </div>
@@ -627,9 +719,9 @@ export const CommonFilmGallery: React.FC<CommonFilmGalleryProps> = ({
                       </p>
                     )}
 
-                    {detailsFilm.previewCode && (
+                    {isFilmOwner(detailsFilm) && detailsFilm.previewCode && (
                       <div className="text-[11px] font-mono text-neutral-400 text-center pt-1 bg-neutral-900/60 p-2 rounded-lg border border-neutral-800">
-                        Demo preview code for {detailsFilm.title}:{' '}
+                        Your film preview code:{' '}
                         <button
                           type="button"
                           onClick={() => setCode(detailsFilm.previewCode || '')}

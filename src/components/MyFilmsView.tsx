@@ -1,7 +1,8 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Film as FilmType } from '../types/cinemaPlatform';
-import { Play, Lock, KeyRound, Copy, Check, MessageSquare, CreditCard, RefreshCw, Upload, Plus } from 'lucide-react';
+import { Play, Lock, KeyRound, Copy, Check, MessageSquare, CreditCard, RefreshCw, Upload, Plus, Download, Zap, HardDrive, Loader2 } from 'lucide-react';
 import { api } from '../services/apiClient';
+import { offlineStorage } from '../services/offlineStorageService';
 
 interface MyFilmsViewProps {
   films: FilmType[];
@@ -21,6 +22,43 @@ export const MyFilmsView: React.FC<MyFilmsViewProps> = ({
   const [copiedCodeId, setCopiedCodeId] = useState<string | null>(null);
   const [resendingFilmId, setResendingFilmId] = useState<string | null>(null);
   const [resendStatus, setResendStatus] = useState<string | null>(null);
+  const [downloadedFilmIds, setDownloadedFilmIds] = useState<string[]>([]);
+  const [downloadingMap, setDownloadingMap] = useState<Record<string, number>>({});
+
+  useEffect(() => {
+    setDownloadedFilmIds(offlineStorage.getDownloadedFilmIds());
+  }, []);
+
+  const handleDownloadFilm = async (film: FilmType, e?: React.MouseEvent) => {
+    e?.stopPropagation();
+    if (downloadingMap[film.id] !== undefined) return;
+
+    setDownloadingMap((prev) => ({ ...prev, [film.id]: 10 }));
+    try {
+      const streamUrl =
+        film.videoFileUrl && !film.videoFileUrl.includes('gtv-videos-bucket')
+          ? film.videoFileUrl
+          : '/videos/theatrical_master_kalki.mp4';
+      await offlineStorage.downloadVideoForZeroBufferPlayback(
+        film.id,
+        film.title,
+        streamUrl,
+        (prog) => {
+          setDownloadingMap((prev) => ({ ...prev, [film.id]: prog.percent }));
+        },
+        film
+      );
+      setDownloadedFilmIds(offlineStorage.getDownloadedFilmIds());
+    } catch (err) {
+      console.error('Download error:', err);
+    } finally {
+      setDownloadingMap((prev) => {
+        const next = { ...prev };
+        delete next[film.id];
+        return next;
+      });
+    }
+  };
 
   const handleCopyCode = (filmId: string, code: string) => {
     navigator.clipboard.writeText(code);
@@ -179,15 +217,38 @@ export const MyFilmsView: React.FC<MyFilmsViewProps> = ({
                   </button>
                 )}
 
-                {/* Owner Watch Film Button (Section #22: Plays without code!) */}
+                {/* Owner Watch Film Button & Zero-Buffer Local Download Option */}
                 {film.paymentStatus === 'successful' && (
-                  <button
-                    onClick={() => onWatchFilmWithoutCode(film)}
-                    className="w-full sm:w-auto px-5 py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-neutral-950 font-black text-xs uppercase tracking-wider flex items-center justify-center gap-1.5 shadow-lg shadow-emerald-500/20"
-                  >
-                    <Play className="w-4 h-4 fill-current" />
-                    <span>WATCH FILM (OWNER ACCESS)</span>
-                  </button>
+                  <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
+                    {downloadingMap[film.id] !== undefined ? (
+                      <div className="px-3 py-2 rounded-xl bg-neutral-900 border border-neutral-800 flex items-center justify-center gap-2 text-xs font-mono text-amber-400">
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        <span>Saving to Device ({downloadingMap[film.id]}%)...</span>
+                      </div>
+                    ) : downloadedFilmIds.includes(film.id) ? (
+                      <span className="px-3 py-2 rounded-xl bg-emerald-950/80 border border-emerald-500/40 text-emerald-300 text-xs font-mono font-bold flex items-center justify-center gap-1.5 shadow-sm">
+                        <Zap className="w-3.5 h-3.5 text-emerald-400 fill-emerald-400" />
+                        <span>Zero-Buffer Ready</span>
+                      </span>
+                    ) : (
+                      <button
+                        onClick={(e) => handleDownloadFilm(film, e)}
+                        className="px-3.5 py-2.5 rounded-xl bg-neutral-900 hover:bg-neutral-800 border border-neutral-700 text-neutral-300 hover:text-white font-bold text-xs uppercase flex items-center justify-center gap-1.5 transition-colors"
+                        title="Download to local device for 100% buffer-free playback"
+                      >
+                        <Download className="w-3.5 h-3.5 text-amber-400" />
+                        <span>Download (Zero Buffer)</span>
+                      </button>
+                    )}
+
+                    <button
+                      onClick={() => onWatchFilmWithoutCode(film)}
+                      className="px-5 py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-neutral-950 font-black text-xs uppercase tracking-wider flex items-center justify-center gap-1.5 shadow-lg shadow-emerald-500/20 active:scale-95 transition-all"
+                    >
+                      <Play className="w-4 h-4 fill-current" />
+                      <span>WATCH FILM (OWNER ACCESS)</span>
+                    </button>
+                  </div>
                 )}
               </div>
             </div>

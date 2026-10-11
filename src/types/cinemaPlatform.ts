@@ -31,9 +31,15 @@ export interface AccessibilityTrack {
   languageName: string;
   fileUrl: string;
   fileName: string;
+  fileSize?: string;
+  audioUrl?: string;
+  cueCount?: number;
+  uploadedAt?: string;
   format: string; // SRT, VTT, TTML, MP3, WAV, AAC
   version: string;
   status: 'valid' | 'invalid' | 'processing';
+  driveFileId?: string;
+  driveUrl?: string;
   cues?: Array<{
     id: string;
     startTime: number;
@@ -71,8 +77,19 @@ export interface Film {
   previewStatus: PreviewStatus;
   previewCode?: string; // 9-digit code (only visible to owner/admin, never public)
   previewCodeHash?: string;
+  isOwner?: boolean;
   cbfcCertNo?: string;
   durationMinutes: number;
+  submitterName?: string;
+  submitterEmail?: string;
+  submitterMobile?: string;
+  submitterProductionHouse?: string;
+  driveFileId?: string;
+  driveWebViewLink?: string;
+  driveWebContentLink?: string;
+  driveFolderId?: string;
+  driveAccountEmail?: string;
+  driveSynced?: boolean;
   uploadedCcTracks: AccessibilityTrack[];
   uploadedAdTracks: AccessibilityTrack[];
   availableCcLanguages?: Array<{ code: string; name: string }>;
@@ -94,7 +111,7 @@ export interface Payment {
   amount: number; // Min 15000 INR
   currency: 'INR';
   transactionId: string;
-  gateway: 'UPI' | 'Debit Card' | 'Credit Card' | 'Net Banking';
+  gateway: 'UPI' | 'Debit Card' | 'Credit Card' | 'Net Banking' | 'ADMIN_WAIVED';
   status: PaymentStatus;
   previewCodeGenerated?: string;
   createdAt: string;

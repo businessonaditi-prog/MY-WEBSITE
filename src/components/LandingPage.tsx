@@ -19,6 +19,8 @@ import {
   X,
   HardDrive,
   Globe,
+  Copy,
+  Check,
 } from 'lucide-react';
 import { Film, User } from '../types/cinemaPlatform';
 
@@ -29,7 +31,7 @@ interface LandingPageProps {
   onSelectFilmForPreviewWithCode?: (film: Film, code: string) => void;
   onOwnerWatchFilm?: (film: Film) => void;
   onOpenAuth?: (mode?: 'login' | 'register') => void;
-  onOpenDomainSetup?: () => void;
+  onOpenDomainModal?: () => void;
   currentUser?: User | null;
 }
 
@@ -40,7 +42,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({
   onSelectFilmForPreviewWithCode,
   onOwnerWatchFilm,
   onOpenAuth,
-  onOpenDomainSetup,
+  onOpenDomainModal,
   currentUser,
 }) => {
   const [films, setFilms] = useState<Film[]>([]);
@@ -50,15 +52,39 @@ export const LandingPage: React.FC<LandingPageProps> = ({
   const [activeFilmForCode, setActiveFilmForCode] = useState<Film | null>(null);
   const [inputCode, setInputCode] = useState('');
   const [codeError, setCodeError] = useState<string | null>(null);
+  const [copiedCodeId, setCopiedCodeId] = useState<string | null>(null);
 
   useEffect(() => {
     fetchFilms();
-  }, []);
+  }, [currentUser]);
+
+  const isFilmOwner = (film: Film): boolean => {
+    if (!currentUser) return false;
+    if (film.isOwner) return true;
+    if (film.userId && film.userId === currentUser.id) return true;
+    if (currentUser.productionHouseName && film.productionHouseName &&
+        currentUser.productionHouseName.toLowerCase() === film.productionHouseName.toLowerCase()) {
+      return true;
+    }
+    return false;
+  };
+
+  const handleCopyCode = (filmId: string, codeToCopy: string, e?: React.MouseEvent) => {
+    e?.stopPropagation();
+    navigator.clipboard.writeText(codeToCopy);
+    setCopiedCodeId(filmId);
+    setTimeout(() => setCopiedCodeId(null), 2000);
+  };
 
   const fetchFilms = async () => {
     setLoadingFilms(true);
     try {
-      const res = await fetch('/api/films');
+      const headers: Record<string, string> = {};
+      const token = localStorage.getItem('cbfc_auth_token');
+      if (token) {
+        headers['Authorization'] = `Bearer ${token}`;
+      }
+      const res = await fetch('/api/films', { headers });
       const data = await res.json();
       setFilms(data.films || []);
     } catch (e) {
@@ -145,19 +171,23 @@ export const LandingPage: React.FC<LandingPageProps> = ({
           Synchronized Audio Description (AD) and Closed Captions (CC) compliance under Central Board guidelines.
         </p>
 
-        {/* Parallel Domain Badge */}
+        {/* Custom Domain & Web/App Sync Badge */}
         <div className="flex flex-wrap items-center justify-center gap-2 pt-1">
-          <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-cyan-950/70 border border-cyan-600/40 text-cyan-300 text-xs font-mono">
-            <Globe className="w-3.5 h-3.5 text-cyan-400" />
-            <span>Parallel Custom Domain: <strong className="text-white">www.cinead.cc</strong></span>
-            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
+          <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-amber-950/60 border border-amber-600/40 text-amber-300 text-xs font-mono">
+            <Globe className="w-3.5 h-3.5 text-amber-400" />
+            <span>Domain: <strong className="text-white">cinead.cc</strong> (GoDaddy)</span>
+            <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse"></span>
           </div>
-          {onOpenDomainSetup && (
+          <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-emerald-950/60 border border-emerald-600/40 text-emerald-300 text-xs font-mono">
+            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
+            <span>Web &amp; App Synced</span>
+          </div>
+          {onOpenDomainModal && (
             <button
-              onClick={onOpenDomainSetup}
+              onClick={onOpenDomainModal}
               className="px-2.5 py-1 rounded-full bg-neutral-900 hover:bg-neutral-800 border border-neutral-700 text-neutral-300 text-xs font-mono hover:text-white transition-colors"
             >
-              DNS &amp; Domain Setup &rarr;
+              GoDaddy Connect &rarr;
             </button>
           )}
         </div>
@@ -290,23 +320,81 @@ export const LandingPage: React.FC<LandingPageProps> = ({
                     </p>
                   </div>
 
-                  {/* Button below thumbnail: Enter Code to Play */}
+                  {/* ACTIONS & CODE DISPLAY BELOW THUMBNAIL */}
                   <div className="pt-2 border-t border-neutral-800/80">
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setActiveFilmForCode(film);
-                        setInputCode('');
-                        setCodeError(null);
-                      }}
-                      className="w-full py-2 px-2.5 rounded-xl bg-amber-500/15 hover:bg-amber-500 text-amber-300 hover:text-neutral-950 border border-amber-500/40 text-xs font-mono font-bold flex items-center justify-center gap-1.5 transition-all shadow-md active:scale-98"
-                    >
-                      <Lock className="w-3.5 h-3.5" />
-                      <span>ENTER CODE TO PLAY</span>
-                    </button>
-                    <span className="text-[10px] font-mono text-neutral-500 block text-center mt-1">
-                      Guest playback locked without code
-                    </span>
+                    {isFilmOwner(film) ? (
+                      <div className="space-y-2">
+                        {/* 9-Digit Code below thumbnail for own film */}
+                        {film.previewCode ? (
+                          <div className="p-2 rounded-xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-between text-xs font-mono">
+                            <div>
+                              <span className="text-[9px] text-amber-400 font-bold block uppercase tracking-wider">
+                                YOUR 9-DIGIT CODE:
+                              </span>
+                              <span className="text-amber-300 font-black text-sm tracking-wider">
+                                {film.previewCode}
+                              </span>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={(e) => handleCopyCode(film.id, film.previewCode!, e)}
+                              className="px-2 py-1 rounded bg-amber-500/20 hover:bg-amber-500 text-amber-300 hover:text-neutral-950 font-bold text-[10px] flex items-center gap-1 transition-all"
+                              title="Copy your film preview code to share"
+                            >
+                              {copiedCodeId === film.id ? (
+                                <>
+                                  <Check className="w-3 h-3 text-emerald-400" />
+                                  <span>COPIED</span>
+                                </>
+                              ) : (
+                                <>
+                                  <Copy className="w-3 h-3" />
+                                  <span>COPY</span>
+                                </>
+                              )}
+                            </button>
+                          </div>
+                        ) : (
+                          <div className="px-2 py-1 rounded bg-neutral-950/80 border border-neutral-800 text-[10px] font-mono text-emerald-400 flex items-center gap-1.5">
+                            <Check className="w-3 h-3" />
+                            <span>YOUR UPLOADED FILM • OWNER ACCESS ACTIVE</span>
+                          </div>
+                        )}
+
+                        {/* Owner Watch Film Button - No code required */}
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            if (onOwnerWatchFilm) {
+                              onOwnerWatchFilm(film);
+                            }
+                          }}
+                          className="w-full py-2.5 px-3 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-neutral-950 text-xs font-mono font-black uppercase flex items-center justify-center gap-1.5 shadow-md shadow-emerald-500/20 active:scale-98 transition-all"
+                        >
+                          <Play className="w-3.5 h-3.5 fill-current" />
+                          <span>PLAY FILM (OWNER - NO CODE)</span>
+                        </button>
+                      </div>
+                    ) : (
+                      /* Other user's film: Code mandatory */
+                      <div>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setActiveFilmForCode(film);
+                            setInputCode('');
+                            setCodeError(null);
+                          }}
+                          className="w-full py-2 px-2.5 rounded-xl bg-amber-500/15 hover:bg-amber-500 text-amber-300 hover:text-neutral-950 border border-amber-500/40 text-xs font-mono font-bold flex items-center justify-center gap-1.5 transition-all shadow-md active:scale-98"
+                        >
+                          <Lock className="w-3.5 h-3.5" />
+                          <span>ENTER CODE TO PLAY</span>
+                        </button>
+                        <span className="text-[10px] font-mono text-neutral-500 block text-center mt-1">
+                          Code required from filmmaker
+                        </span>
+                      </div>
+                    )}
                   </div>
                 </div>
               </div>
@@ -388,9 +476,9 @@ export const LandingPage: React.FC<LandingPageProps> = ({
                 </p>
               )}
 
-              {activeFilmForCode.previewCode && (
+              {isFilmOwner(activeFilmForCode) && activeFilmForCode.previewCode && (
                 <div className="text-[11px] font-mono text-neutral-400 text-center pt-1 bg-neutral-950/60 p-2 rounded-lg border border-neutral-800">
-                  Demo hint: Valid preview code for {activeFilmForCode.title} is{' '}
+                  Your film preview code:{' '}
                   <button
                     type="button"
                     onClick={() => setInputCode(activeFilmForCode.previewCode || '')}

@@ -21,7 +21,7 @@ export const INITIAL_PACKAGES: MoviePackage[] = [
     downloadProgress: 100,
     availableLanguages: ['Hindi', 'Telugu', 'Tamil', 'English'],
     audioWaveformFingerprint: [0.3, 0.7, 0.9, 0.4, 0.8, 0.2, 0.6, 0.9, 0.5, 0.3, 0.7, 0.8],
-    demoVideoUrl: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/TearsOfSteel.mp4',
+    demoVideoUrl: '/videos/theatrical_master_kalki.mp4',
     adTracks: {
       Hindi: {
         language: 'Hindi',
@@ -232,7 +232,7 @@ export const INITIAL_PACKAGES: MoviePackage[] = [
     downloadProgress: 100,
     availableLanguages: ['Hindi', 'Tamil', 'Telugu'],
     audioWaveformFingerprint: [0.8, 0.9, 0.4, 0.6, 0.9, 0.7, 0.3, 0.8, 0.5, 0.9],
-    demoVideoUrl: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ElephantsDream.mp4',
+    demoVideoUrl: '/videos/theatrical_master_sample.mp4',
     adTracks: {
       Hindi: {
         language: 'Hindi',
